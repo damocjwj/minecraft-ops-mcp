@@ -4,8 +4,11 @@
 
 ## Supported Security Model
 
-- Credentials are supplied through environment variables for stdio MCP use.
-- The MCP server does not expose an HTTP listener.
+- Credentials are supplied through environment variables or a protected env file.
+- The default stdio mode does not expose an HTTP listener.
+- HTTP modes (`sse` and `streamable-http`) must be bound only to trusted interfaces or protected behind VPN, reverse proxy authentication, firewall rules, and TLS.
+- HTTP modes validate Host and Origin headers through SDK transport security settings; configure allowed hosts/origins explicitly for domain or reverse-proxy deployments.
+- HTTP modes support bearer-token authentication through `MINECRAFT_OPS_MCP_BEARER_TOKEN`; non-local binds require it unless `MINECRAFT_OPS_MCP_ALLOW_UNAUTHENTICATED_HTTP=true` is explicitly set.
 - High-risk tools require `confirm=true` or return a `dry_run=true` preview.
 - Tool calls are written to an audit log unless `MINECRAFT_OPS_AUDIT_LOG` is empty.
 - Audit logs redact common secret fields and text lines containing password/secret markers.
@@ -23,6 +26,8 @@
 ## Operational Recommendations
 
 - Run this MCP server on the same trusted host or private network as the Minecraft management backends.
+- Prefer stdio for local-only use. Prefer Streamable HTTP over legacy SSE for new remote clients.
+- For remote HTTP use, set a long random bearer token and provide it to the client through its secret or environment mechanism.
 - Keep RCON and MSMP bound to localhost, VPN, or another trusted network boundary.
 - Prefer least-privilege MCSManager API keys where possible.
 - Do not commit `.env`, API keys, RCON passwords, MSMP secrets, generated reports, or audit logs.

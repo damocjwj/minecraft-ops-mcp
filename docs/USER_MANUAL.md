@@ -15,6 +15,69 @@ MCSManager 是主接口。RCON 和 MSMP 不作为全局客户端 endpoint 配置
 
 ## 2. 客户端配置
 
+快速配置 Codex：
+
+```bash
+cd /home/damoc/codes/minecraft-ops-mcp
+MCSM_BASE_URL=http://your-mcsm-host:23333 \
+MCSM_API_KEY=replace-me \
+MCSM_DEFAULT_DAEMON_ID=replace-me \
+MCSM_DEFAULT_INSTANCE_UUID=replace-me \
+scripts/quick_setup.py --write --replace
+```
+
+脚本会：
+
+- 安装或更新 `minecraft-ops-runbook` skill；
+- 写入 `$CODEX_HOME/minecraft-ops-mcp.env`，权限 `0600`；
+- 写入 `$CODEX_HOME/bin/minecraft-ops-mcp-launch`；
+- 调用 `codex mcp add minecraft-ops -- <launcher>` 注册 MCP server。
+
+默认不执行写入，直接运行 `scripts/quick_setup.py` 只会展示计划。`scripts/quick_setup.py --print-json` 可生成通用 MCP JSON 配置片段。
+如果要生成或注册 Streamable HTTP URL，使用 `scripts/quick_setup.py --mcp-transport streamable-http --print-json`。
+
+### HTTP 远程访问
+
+默认 transport 是 `stdio`，适合同机 agent 直接启动 MCP 子进程。
+
+如果 MCP 部署在 MCSManager 主机、agent 在本地，可以启动 HTTP transport。旧版 SSE 客户端使用：
+
+```bash
+MINECRAFT_OPS_MCP_BEARER_TOKEN=replace-with-long-random-token \
+MINECRAFT_OPS_MCP_ALLOWED_HOSTS=mcsm-host:8000 \
+minecraft-ops-mcp --transport sse --host 0.0.0.0 --port 8000
+```
+
+SSE 入口是：
+
+```text
+http://mcsm-host:8000/sse
+```
+
+当前 MCP 规范推荐 Streamable HTTP。Codex 的 `codex mcp add --url` 使用这种模式：
+
+```bash
+MINECRAFT_OPS_MCP_BEARER_TOKEN=replace-with-long-random-token \
+MINECRAFT_OPS_MCP_ALLOWED_HOSTS=mcsm-host:8000 \
+minecraft-ops-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+```
+
+本地 Codex 注册：
+
+```bash
+export MINECRAFT_OPS_MCP_BEARER_TOKEN=replace-with-long-random-token
+codex mcp add minecraft-ops --url http://mcsm-host:8000/mcp --bearer-token-env-var MINECRAFT_OPS_MCP_BEARER_TOKEN
+```
+
+`codex mcp add --url` 只注册客户端配置，不会启动远程 MCP 服务。请在 MCP 所在主机使用 systemd、tmux、容器或其他进程管理器保持 HTTP 服务运行。
+
+HTTP transport 默认验证 Host/Origin，降低 DNS rebinding 风险。公网域名、反向代理或浏览器客户端需要配置：
+
+- `MINECRAFT_OPS_MCP_ALLOWED_HOSTS`
+- `MINECRAFT_OPS_MCP_ALLOWED_ORIGINS`
+
+当 HTTP transport 绑定到非本机地址时，默认还要求 `MINECRAFT_OPS_MCP_BEARER_TOKEN`。只有在 VPN、反向代理认证或其他受控边界已经覆盖认证时，才考虑显式设置 `MINECRAFT_OPS_MCP_ALLOW_UNAUTHENTICATED_HTTP=true`。
+
 最小 MCP 客户端配置：
 
 ```json

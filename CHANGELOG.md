@@ -2,6 +2,14 @@
 
 All notable changes to `minecraft-ops-mcp` are documented here.
 
+## Unreleased
+
+- Add `scripts/quick_setup.py` to install the runbook skill and register the MCP server with Codex using a 0600 env file plus launcher script.
+- Add official SDK-backed HTTP transports:
+  - legacy HTTP+SSE at `/sse` and `/messages/`;
+  - current Streamable HTTP at `/mcp`;
+  - Host/Origin validation and optional bearer-token authentication for HTTP transports.
+
 ## 0.8.0 - 2026-04-15
 
 - Make MCSManager the authoritative backend configuration source for multi-server operations.

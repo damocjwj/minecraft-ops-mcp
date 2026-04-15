@@ -1,6 +1,6 @@
 # Minecraft Ops MCP
 
-`minecraft-ops-mcp` 是面向 Minecraft 服务器管理和运维的 MCP stdio 服务。它以 MCSManager 作为主控制面，并提供：
+`minecraft-ops-mcp` 是面向 Minecraft 服务器管理和运维的 MCP 服务，支持 stdio、旧版 HTTP+SSE 和当前 Streamable HTTP。它以 MCSManager 作为主控制面，并提供：
 
 - 通过 MCSManager 管理实例生命周期、日志、文件、上传和下载；
 - 通过按实例解析的 RCON 执行老版本或命令型运维操作；
@@ -24,11 +24,87 @@ python3 -m pip install -e .
 minecraft-ops-mcp
 ```
 
-开发调试：
+默认使用 stdio transport。开发调试：
 
 ```bash
 cd /home/damoc/codes/minecraft-ops-mcp
 PYTHONPATH=src python3 -m minecraft_ops_mcp
+```
+
+HTTP 远程访问：
+
+```bash
+# 旧版 HTTP+SSE transport，兼容 MCP 2024-11-05 客户端
+MINECRAFT_OPS_MCP_BEARER_TOKEN=replace-with-long-random-token \
+PYTHONPATH=src python3 -m minecraft_ops_mcp \
+  --transport sse \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --allowed-host mcsm-host.example:8000
+
+# 当前 MCP 标准推荐的 Streamable HTTP transport，适合支持 --url 的客户端
+MINECRAFT_OPS_MCP_BEARER_TOKEN=replace-with-long-random-token \
+PYTHONPATH=src python3 -m minecraft_ops_mcp \
+  --transport streamable-http \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --allowed-host mcsm-host.example:8000
+```
+
+端点默认值：
+
+- SSE：`GET /sse`，客户端随后向 `/messages/?session_id=...` POST。
+- Streamable HTTP：`/mcp`。
+- 健康检查：`/health`。
+
+本地 Codex 注册远程 Streamable HTTP MCP：
+
+```bash
+codex mcp add minecraft-ops --url http://mcsm-host.example:8000/mcp
+```
+
+如果 HTTP MCP 设置了 bearer token，本地 Codex 也需要能读取同名环境变量：
+
+```bash
+export MINECRAFT_OPS_MCP_BEARER_TOKEN=replace-with-long-random-token
+codex mcp add minecraft-ops --url http://mcsm-host.example:8000/mcp --bearer-token-env-var MINECRAFT_OPS_MCP_BEARER_TOKEN
+```
+
+`codex mcp add --url` 只注册客户端配置，不会启动远程服务。HTTP 模式需要在 MCP 所在主机用 systemd、tmux、容器或进程管理器保持服务运行。
+
+HTTP transport 默认启用 Host/Origin 校验。绑定非本机地址时还默认要求 `MINECRAFT_OPS_MCP_BEARER_TOKEN`，除非显式设置 `MINECRAFT_OPS_MCP_ALLOW_UNAUTHENTICATED_HTTP=true`。反向代理或公网域名部署时必须设置 `--allowed-host` 或 `MINECRAFT_OPS_MCP_ALLOWED_HOSTS`，浏览器客户端还需要设置 `--allowed-origin` 或 `MINECRAFT_OPS_MCP_ALLOWED_ORIGINS`。
+
+## 快速配置 Codex
+
+仓库提供了快速配置脚本，会安装 `minecraft-ops-runbook` skill，并通过 `codex mcp add` 注册 MCP server：
+
+```bash
+cd /home/damoc/codes/minecraft-ops-mcp
+MCSM_BASE_URL=http://your-mcsm-host:23333 \
+MCSM_API_KEY=replace-me \
+MCSM_DEFAULT_DAEMON_ID=replace-me \
+MCSM_DEFAULT_INSTANCE_UUID=replace-me \
+scripts/quick_setup.py --write --replace
+```
+
+脚本默认把敏感配置写入 `$CODEX_HOME/minecraft-ops-mcp.env`，权限为 `0600`，并生成 `$CODEX_HOME/bin/minecraft-ops-mcp-launch` 作为 MCP 启动器。Codex config 中只保存启动器路径，不直接保存 API key。
+
+只预览不写入：
+
+```bash
+scripts/quick_setup.py
+```
+
+生成通用 MCP JSON 片段：
+
+```bash
+scripts/quick_setup.py --print-json
+```
+
+生成 Streamable HTTP 客户端片段：
+
+```bash
+scripts/quick_setup.py --mcp-transport streamable-http --print-json
 ```
 
 ## MCP 客户端配置
@@ -74,6 +150,17 @@ MINECRAFT_OPS_RCON_TIMEOUT_SECONDS=5
 MINECRAFT_OPS_RCON_ENCODING=utf-8
 MINECRAFT_OPS_MSMP_TIMEOUT_SECONDS=8
 MINECRAFT_OPS_MSMP_TLS_VERIFY=true
+```
+
+可选 MCP transport 变量：
+
+```bash
+MINECRAFT_OPS_MCP_TRANSPORT=stdio
+MINECRAFT_OPS_MCP_HOST=127.0.0.1
+MINECRAFT_OPS_MCP_PORT=8000
+MINECRAFT_OPS_MCP_ALLOWED_HOSTS=mcsm-host.example:8000
+MINECRAFT_OPS_MCP_ALLOWED_ORIGINS=https://agent.example
+MINECRAFT_OPS_MCP_BEARER_TOKEN=replace-with-long-random-token
 ```
 
 完整变量见 [.env.example](.env.example)。

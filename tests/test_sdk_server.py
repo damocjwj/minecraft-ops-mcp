@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import unittest
 import threading
 
+import httpx
 import mcp.types as types
 
 from minecraft_ops_mcp.config import AppConfig
 from minecraft_ops_mcp.models import Prompt, Resource, Tool
-from minecraft_ops_mcp.server import make_mcp_server
+from minecraft_ops_mcp.server import (
+    HttpTransportOptions,
+    _effective_allowed_hosts,
+    http_transport_options_from_args,
+    make_mcp_server,
+    make_sse_asgi_app,
+    make_streamable_http_asgi_app,
+    parse_args,
+)
 
 
 class SdkServerTests(unittest.IsolatedAsyncioTestCase):
@@ -139,6 +150,71 @@ class SdkServerTests(unittest.IsolatedAsyncioTestCase):
         get_request = types.GetPromptRequest(params={"name": "demo_prompt", "arguments": {}})
         get_response = await server.request_handlers[types.GetPromptRequest](get_request)
         self.assertEqual(get_response.root.messages[0].content.text, "demo")
+
+    async def test_http_transport_cli_options(self) -> None:
+        args = parse_args(
+            [
+                "--transport",
+                "sse",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8811",
+                "--sse-path",
+                "events",
+                "--message-path",
+                "messages",
+                "--allowed-host",
+                "ops.example.test:8811",
+                "--allowed-origin",
+                "https://ops.example.test",
+                "--http-bearer-token",
+                "secret-token",
+            ]
+        )
+        options = http_transport_options_from_args(args)
+        self.assertEqual(args.transport, "sse")
+        self.assertEqual(options.sse_path, "/events")
+        self.assertEqual(options.message_path, "/messages/")
+        self.assertEqual(options.allowed_hosts, ("ops.example.test:8811",))
+        self.assertEqual(options.allowed_origins, ("https://ops.example.test",))
+        self.assertEqual(options.bearer_token, "secret-token")
+
+    async def test_nonlocal_http_transport_requires_auth(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(["--transport", "streamable-http", "--host", "0.0.0.0"])
+
+    async def test_http_transport_default_allowed_hosts(self) -> None:
+        options = HttpTransportOptions(host="0.0.0.0", port=8812)
+        hosts = _effective_allowed_hosts(options)
+        self.assertIn("127.0.0.1:8812", hosts)
+        self.assertIn("localhost:8812", hosts)
+
+    async def test_sse_asgi_app_routes(self) -> None:
+        options = HttpTransportOptions(sse_path="/events", message_path="/messages/")
+        app = make_sse_asgi_app(self.make_server(), options)
+        paths = {route.path for route in app.routes}
+        self.assertIn("/health", paths)
+        self.assertIn("/events", paths)
+        self.assertIn("/messages", paths)
+
+    async def test_streamable_http_asgi_app_routes(self) -> None:
+        options = HttpTransportOptions(streamable_http_path="/mcp")
+        app = make_streamable_http_asgi_app(self.make_server(), options)
+        paths = {route.path for route in app.routes}
+        self.assertIn("/health", paths)
+        self.assertIn("/mcp", paths)
+
+    async def test_http_bearer_auth_allows_health_and_rejects_mcp_without_token(self) -> None:
+        options = HttpTransportOptions(streamable_http_path="/mcp", bearer_token="secret-token")
+        app = make_streamable_http_asgi_app(self.make_server(), options)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            health = await client.get("/health")
+            self.assertEqual(health.status_code, 200)
+            unauth = await client.post("/mcp", json={"jsonrpc": "2.0", "method": "ping", "id": 1})
+            self.assertEqual(unauth.status_code, 401)
+            self.assertEqual(unauth.headers["www-authenticate"], "Bearer")
 
 
 if __name__ == "__main__":

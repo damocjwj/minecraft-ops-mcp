@@ -4,11 +4,11 @@
 
 ## 1. 架构
 
-`minecraft-ops-mcp` 是基于官方 MCP Python SDK 的 stdio MCP 服务。
+`minecraft-ops-mcp` 是基于官方 MCP Python SDK 的 MCP 服务。默认 transport 是 stdio，同时提供旧版 HTTP+SSE 和当前 Streamable HTTP。
 
 主要模块：
 
-- `server.py`：注册 MCP tools、resources、prompts。
+- `server.py`：注册 MCP tools、resources、prompts，并挂载 stdio、SSE、Streamable HTTP transport。
 - `tools.py`：工具目录、schema、输出 schema、安全包装和后端路由。
 - `config.py`：环境变量解析和脱敏配置视图。
 - `policy.py`：高风险工具 gating 和原始命令 allow/deny 策略。
@@ -18,6 +18,16 @@
 - `modpack.py`：jar 元数据、快照、diff、应用/回滚、测试记录。
 
 `models.py` 中的内部 `Tool` 模型会在 `server.py` 中转换成 MCP SDK 对象。
+
+Transport 实现：
+
+- stdio：SDK `stdio_server()`。
+- SSE：SDK `SseServerTransport`，默认 `GET /sse` 和 `POST /messages/?session_id=...`。
+- Streamable HTTP：SDK `StreamableHTTPSessionManager`，默认 `/mcp`。
+- HTTP 模式的 `/health` 返回版本和端点信息，不包含密钥。
+- `BearerAuthMiddleware` 在配置 `MINECRAFT_OPS_MCP_BEARER_TOKEN` 后保护 MCP HTTP 端点；`/` 和 `/health` 保持公开。
+
+HTTP transport 默认启用 SDK `TransportSecuritySettings` 的 Host/Origin 校验。绑定 `0.0.0.0`、反向代理或域名访问时，必须配置允许的 Host/Origin。非本机绑定默认要求 bearer token，除非显式启用 `MINECRAFT_OPS_MCP_ALLOW_UNAUTHENTICATED_HTTP`。
 
 ## 2. 配置模型
 
@@ -136,7 +146,26 @@ python3 -B scripts/multi_server_backend_probe.py > /tmp/minecraft-ops-mcp-multi-
 
 当前真实环境只有一个 MCSManager daemon，因此多服务器探针已覆盖同 daemon 多实例。跨 daemon 使用同样的 per-call `daemonId` 路径，但仍需要多 daemon 环境实测。
 
-## 8. 发布检查
+## 8. 快速配置脚本
+
+`scripts/quick_setup.py` 用于本地快速安装 MCP 与 skill：
+
+- dry-run 默认只展示计划；
+- `--write` 才会写入 `$CODEX_HOME` 并调用 `codex mcp add`；
+- `--replace` 会备份并替换已有 env、launcher、skill 或 MCP server；
+- `--print-json` 输出通用 MCP client JSON；
+- `--mcp-transport streamable-http` 输出或注册 HTTP URL；
+- 默认把 API key 写入 0600 env 文件，Codex config 只保存 launcher 路径。
+
+脚本不依赖项目包导入，便于在依赖未安装前运行。修改脚本后至少运行：
+
+```bash
+python3 -m py_compile scripts/quick_setup.py
+python3 scripts/quick_setup.py --print-json
+python3 scripts/quick_setup.py --mcp-transport streamable-http --print-json
+```
+
+## 9. 发布检查
 
 发布前：
 
@@ -147,10 +176,11 @@ python3 -B scripts/multi_server_backend_probe.py > /tmp/minecraft-ops-mcp-multi-
 5. 用 `python3 -m build --wheel` 构建 wheel；
 6. 确认临时 probe 实例已删除。
 
-## 9. 依赖
+## 10. 依赖
 
 - `mcp`：官方 MCP Python SDK。
 - `httpx`：MCSManager daemon 流式上传/下载和 URL staging。
+- `starlette`、`uvicorn`：SSE 和 Streamable HTTP ASGI 服务。
 - `websocket-client`：MSMP JSON-RPC over WebSocket。
 
 后续硬化见 [LIMITATIONS.md](LIMITATIONS.md)，重点是 fake MCSManager/RCON/MSMP 服务、CI 覆盖和持久连接池。
