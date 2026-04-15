@@ -77,6 +77,11 @@ class AppConfig:
     allow_raw_commands: bool = False
     raw_command_allowlist: tuple[str, ...] = ()
     raw_command_denylist: tuple[str, ...] = ()
+    max_bytes: int = 256 * 1024 * 1024
+    upload_allowed_dirs: tuple[str, ...] = ()
+    file_operation_whitelist: tuple[str, ...] = ()
+    upload_url_allowed_domains: tuple[str, ...] = ()
+    modpack_workspace: str = "/tmp/minecraft-ops-mcp-modpacks"
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -105,6 +110,11 @@ class AppConfig:
             allow_raw_commands=_env_bool("MINECRAFT_OPS_ALLOW_RAW_COMMANDS", False),
             raw_command_allowlist=_env_csv("MINECRAFT_OPS_RAW_COMMAND_ALLOWLIST"),
             raw_command_denylist=_env_csv("MINECRAFT_OPS_RAW_COMMAND_DENYLIST"),
+            max_bytes=_env_int("MINECRAFT_OPS_MAX_BYTES", 256 * 1024 * 1024),
+            upload_allowed_dirs=_env_csv("MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS"),
+            file_operation_whitelist=_env_csv("MINECRAFT_OPS_FILE_OPERATION_WHITELIST"),
+            upload_url_allowed_domains=_env_csv("MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS"),
+            modpack_workspace=os.getenv("MINECRAFT_OPS_MODPACK_WORKSPACE", "/tmp/minecraft-ops-mcp-modpacks"),
         )
 
     def redacted(self) -> dict:
@@ -132,4 +142,9 @@ class AppConfig:
             "allow_raw_commands": self.allow_raw_commands,
             "raw_command_allowlist": list(self.raw_command_allowlist),
             "raw_command_denylist": list(self.raw_command_denylist),
+            "max_bytes": self.max_bytes,
+            "upload_allowed_dirs": list(self.upload_allowed_dirs),
+            "file_operation_whitelist": list(self.file_operation_whitelist),
+            "upload_url_allowed_domains": list(self.upload_url_allowed_domains),
+            "modpack_workspace": self.modpack_workspace,
         }

@@ -5,6 +5,7 @@ import os
 import secrets
 import string
 import time
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -21,13 +22,14 @@ def main() -> int:
     nickname = os.getenv("MSMP_PROBE_NICKNAME", f"codex-msmp-probe-{now}")
     game_port = int(os.getenv("MSMP_PROBE_GAME_PORT", "25666"))
     msmp_port = int(os.getenv("MSMP_PROBE_PORT", "25686"))
+    msmp_host = msmp_probe_host()
     cwd = os.getenv("MSMP_PROBE_CWD", f"/opt/mcsmanager/daemon/data/InstanceData/{nickname}")
 
     probe = McpProbe(env)
     probe.start()
     instance_uuid = ""
     try:
-        instance_uuid = run_probe(probe, nickname, cwd, game_port, msmp_port, secret, jar_url)
+        instance_uuid = run_probe(probe, nickname, cwd, game_port, msmp_port, msmp_host, secret, jar_url)
     finally:
         if instance_uuid:
             cleanup_instance(probe, instance_uuid)
@@ -36,6 +38,7 @@ def main() -> int:
     report = {
         "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "nickname": nickname,
+        "msmpHost": msmp_host,
         "msmpPort": msmp_port,
         "total": len(probe.results),
         "passed": sum(1 for result in probe.results if result.ok),
@@ -47,15 +50,35 @@ def main() -> int:
 
 
 def resolve_server_jar_url(version: str) -> str:
-    manifest = json.load(urllib.request.urlopen("https://launchermeta.mojang.com/mc/game/version_manifest.json", timeout=30))
+    manifest = urlopen_json("https://launchermeta.mojang.com/mc/game/version_manifest.json")
     entry = next(item for item in manifest["versions"] if item["id"] == version)
-    metadata = json.load(urllib.request.urlopen(entry["url"], timeout=30))
+    metadata = urlopen_json(entry["url"])
     return metadata["downloads"]["server"]["url"]
+
+
+def urlopen_json(url: str, attempts: int = 3) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return json.load(urllib.request.urlopen(url, timeout=30))
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(2)
+    assert last_error is not None
+    raise last_error
 
 
 def random_secret() -> str:
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(40))
+
+
+def msmp_probe_host() -> str:
+    if os.getenv("MSMP_PROBE_HOST"):
+        return os.environ["MSMP_PROBE_HOST"]
+    parsed = urllib.parse.urlparse(os.environ["MCSM_BASE_URL"])
+    return parsed.hostname or "127.0.0.1"
 
 
 def run_probe(
@@ -64,6 +87,7 @@ def run_probe(
     cwd: str,
     game_port: int,
     msmp_port: int,
+    msmp_host: str,
     secret: str,
     jar_url: str,
 ) -> str:
@@ -96,14 +120,14 @@ def run_probe(
     probe.expect_ok("file.read.server_properties", lambda: probe.tool("file.read", {**ids, "target": "server.properties"}))
     probe.expect_ok("instance.update_config_patch.actual", lambda: probe.tool("instance.update_config_patch", {**ids, "patch": {"tag": ["codex-probe"]}, "confirm": True}))
     probe.expect_ok("server.start.msmp_temp", lambda: probe.tool("server.start", {**ids, "confirm": True}))
-    wait_for_msmp(probe, msmp_port, secret)
+    wait_for_msmp(probe, msmp_port, msmp_host, secret)
     probe.expect_ok("server.restart.msmp_temp", lambda: probe.tool("server.restart", {**ids, "confirm": True}))
     time.sleep(5)
-    wait_for_msmp(probe, msmp_port, secret)
+    wait_for_msmp(probe, msmp_port, msmp_host, secret)
 
     msmp_env = {
         **probe.env,
-        "MSMP_URL": f"ws://damoc-ms-7d42:{msmp_port}",
+        "MSMP_URL": f"ws://{msmp_host}:{msmp_port}",
         "MSMP_SECRET": secret,
         "MSMP_TLS_VERIFY": "false",
     }
@@ -130,7 +154,7 @@ def run_probe(
     probe.expect_ok("server.get_logs.msmp_temp", lambda: probe.tool("server.get_logs", {**ids, "size": 512}))
     wait_for_instance_stopped(probe, instance_uuid)
     probe.expect_ok("server.start.after_msmp_stop", lambda: probe.tool("server.start", {**ids, "confirm": True}))
-    wait_for_msmp(probe, msmp_port, secret)
+    wait_for_msmp(probe, msmp_port, msmp_host, secret)
     probe.expect_ok("server.stop.msmp_temp", lambda: probe.tool("server.stop", {**ids, "confirm": True}))
     wait_for_instance_stopped(probe, instance_uuid)
     return instance_uuid
@@ -213,8 +237,8 @@ def wait_for_instance_uuid(probe: McpProbe, nickname: str) -> str:
     return ""
 
 
-def wait_for_msmp(probe: McpProbe, port: int, secret: str) -> None:
-    env = {**probe.env, "MSMP_URL": f"ws://damoc-ms-7d42:{port}", "MSMP_SECRET": secret, "MSMP_TLS_VERIFY": "false"}
+def wait_for_msmp(probe: McpProbe, port: int, host: str, secret: str) -> None:
+    env = {**probe.env, "MSMP_URL": f"ws://{host}:{port}", "MSMP_SECRET": secret, "MSMP_TLS_VERIFY": "false"}
     deadline = time.monotonic() + 180
     last_error = ""
     while time.monotonic() < deadline:

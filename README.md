@@ -71,7 +71,12 @@ python3 -m compileall -q src scripts
         "MSMP_URL": "ws://127.0.0.1:25585",
         "MSMP_SECRET": "replace-me",
         "MINECRAFT_OPS_RAW_COMMAND_ALLOWLIST": "list,time,help",
-        "MINECRAFT_OPS_RAW_COMMAND_DENYLIST": "stop,op,deop,ban,ban-ip"
+        "MINECRAFT_OPS_RAW_COMMAND_DENYLIST": "stop,op,deop,ban,ban-ip",
+        "MINECRAFT_OPS_MAX_BYTES": "268435456",
+        "MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS": "/tmp/minecraft-ops-mcp-downloads,/srv/minecraft-staging",
+        "MINECRAFT_OPS_FILE_OPERATION_WHITELIST": "server.properties,config,mods,logs,crash-reports",
+        "MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS": "example.com,cdn.example.com",
+        "MINECRAFT_OPS_MODPACK_WORKSPACE": "/srv/minecraft-ops/modpack-workspace"
       }
     }
   }
@@ -117,6 +122,18 @@ MCSManager：
 - `file.touch`
 - `file.compress`
 - `file.uncompress`
+
+整合包元数据：
+
+- `modpack.inspect_jar`
+- `modpack.snapshot_modlist`
+- `modpack.diff_snapshots`
+- `modpack.apply_modlist`
+- `modpack.rollback_snapshot`
+- `modpack.classify_startup_result`
+- `modpack.record_test_run`
+- `modpack.list_test_runs`
+- `modpack.get_test_run`
 
 跨后端便捷工具：
 
@@ -193,6 +210,19 @@ MSMP：
 MINECRAFT_OPS_RAW_COMMAND_ALLOWLIST=list,time,help
 MINECRAFT_OPS_RAW_COMMAND_DENYLIST=stop,op,deop,ban,ban-ip
 ```
+
+文件传输也支持可选护栏：
+
+```text
+MINECRAFT_OPS_MAX_BYTES=268435456
+MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS=/tmp/minecraft-ops-mcp-downloads,/srv/minecraft-staging
+MINECRAFT_OPS_FILE_OPERATION_WHITELIST=server.properties,config,mods,logs,crash-reports
+MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS=example.com,cdn.example.com
+MINECRAFT_OPS_MODPACK_WORKSPACE=/srv/minecraft-ops/modpack-workspace
+```
+
+其中 `MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS` 限制 MCP 宿主机本地上传来源和下载目标目录；`MINECRAFT_OPS_FILE_OPERATION_WHITELIST` 限制实例内文件写入/上传/下载目标前缀；`MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS` 限制 `file.upload_url` 可拉取的域名。
+`MINECRAFT_OPS_MODPACK_WORKSPACE` 用于保存 `modpack.snapshot_modlist` 生成的快照 JSON、jar 缓存和 `modpack.record_test_run` 生成的测试运行记录，后续可以由 agent 或外部 git 流程提交留痕。
 
 ## 后端建议
 

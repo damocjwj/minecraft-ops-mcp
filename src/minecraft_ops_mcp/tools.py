@@ -9,8 +9,9 @@ from .adapters.rcon import RconClient
 from .audit import audit
 from .config import AppConfig
 from .errors import OpsError
-from .policy import HIGH_RISK_TOOLS, ensure_plain_command, ensure_raw_command_allowed, guard_high_risk
 from .models import Tool
+from .modpack import ModpackManager
+from .policy import HIGH_RISK_TOOLS, ensure_plain_command, ensure_raw_command_allowed, guard_high_risk
 
 
 Handler = Callable[[dict], Any]
@@ -20,6 +21,7 @@ def make_tools(config: AppConfig) -> list[Tool]:
     mcsm = McsmClient(config)
     rcon = RconClient(config)
     msmp = MsmpClient(config)
+    modpack = ModpackManager(config, mcsm)
 
     def wrap(name: str, handler: Handler) -> Handler:
         def inner(args: dict) -> Any:
@@ -242,6 +244,76 @@ def make_tools(config: AppConfig) -> list[Tool]:
             args,
             {"backend": "msmp", "setting": setting, "value": value},
             lambda: msmp.call(f"minecraft:serversettings/{setting}/set", [value]),
+        )
+
+    def apply_modlist_tool(args: dict) -> Any:
+        plan = modpack.plan_apply_modlist(
+            manifest=args.get("manifest"),
+            manifest_path=args.get("manifest_path"),
+            snapshot_id=args.get("snapshot_id"),
+            mods_dir=args.get("mods_dir", "mods"),
+            clean_extra=bool(args.get("clean_extra", True)),
+            recursive=bool(args.get("recursive", False)),
+            current_paths=args.get("current_paths"),
+            daemon_public_base_url=args.get("daemon_public_base_url"),
+            daemon_id=args.get("daemonId"),
+            uuid=args.get("uuid"),
+            max_bytes=int(args.get("max_bytes", config.max_bytes)),
+        )
+        return action(
+            "modpack.apply_modlist",
+            args,
+            {"backend": "mcsm", "instance": id_preview(config, args), "plan": plan},
+            lambda: modpack.apply_modlist(
+                manifest=args.get("manifest"),
+                manifest_path=args.get("manifest_path"),
+                snapshot_id=args.get("snapshot_id"),
+                mods_dir=args.get("mods_dir", "mods"),
+                clean_extra=bool(args.get("clean_extra", True)),
+                recursive=bool(args.get("recursive", False)),
+                current_paths=args.get("current_paths"),
+                before_snapshot_name=args.get("before_snapshot_name"),
+                after_snapshot_name=args.get("after_snapshot_name"),
+                daemon_public_base_url=args.get("daemon_public_base_url"),
+                daemon_id=args.get("daemonId"),
+                uuid=args.get("uuid"),
+                max_bytes=int(args.get("max_bytes", config.max_bytes)),
+            ),
+        )
+
+    def rollback_snapshot_tool(args: dict) -> Any:
+        plan = modpack.plan_rollback_snapshot(
+            snapshot=args.get("snapshot"),
+            snapshot_path=args.get("snapshot_path"),
+            snapshot_id=args.get("snapshot_id"),
+            mods_dir=args.get("mods_dir", "mods"),
+            clean_extra=bool(args.get("clean_extra", True)),
+            recursive=bool(args.get("recursive", False)),
+            current_paths=args.get("current_paths"),
+            daemon_public_base_url=args.get("daemon_public_base_url"),
+            daemon_id=args.get("daemonId"),
+            uuid=args.get("uuid"),
+            max_bytes=int(args.get("max_bytes", config.max_bytes)),
+        )
+        return action(
+            "modpack.rollback_snapshot",
+            args,
+            {"backend": "mcsm", "instance": id_preview(config, args), "plan": plan},
+            lambda: modpack.rollback_snapshot(
+                snapshot=args.get("snapshot"),
+                snapshot_path=args.get("snapshot_path"),
+                snapshot_id=args.get("snapshot_id"),
+                mods_dir=args.get("mods_dir", "mods"),
+                clean_extra=bool(args.get("clean_extra", True)),
+                recursive=bool(args.get("recursive", False)),
+                current_paths=args.get("current_paths"),
+                before_snapshot_name=args.get("before_snapshot_name"),
+                after_snapshot_name=args.get("after_snapshot_name"),
+                daemon_public_base_url=args.get("daemon_public_base_url"),
+                daemon_id=args.get("daemonId"),
+                uuid=args.get("uuid"),
+                max_bytes=int(args.get("max_bytes", config.max_bytes)),
+            ),
         )
 
     tools = [
@@ -574,6 +646,7 @@ def make_tools(config: AppConfig) -> list[Tool]:
                         "local_path": string("Optional local output path. Defaults to /tmp/minecraft-ops-mcp-downloads/<file>."),
                         "daemon_public_base_url": string("Optional daemon base URL override, for example http://host:24444."),
                         "overwrite": boolean("Overwrite local_path if it already exists.", default=False),
+                        "max_bytes": integer("Maximum accepted download size in bytes.", default=config.max_bytes),
                     }
                 ),
                 ["file_name"],
@@ -588,6 +661,7 @@ def make_tools(config: AppConfig) -> list[Tool]:
                         "file_name": args.get("file_name"),
                         "local_path": args.get("local_path") or "<default>",
                         "overwrite": bool(args.get("overwrite", False)),
+                        "max_bytes": int(args.get("max_bytes", config.max_bytes)),
                         "instance": id_preview(config, args),
                     },
                     lambda: mcsm.download_local_file(
@@ -596,6 +670,7 @@ def make_tools(config: AppConfig) -> list[Tool]:
                         args.get("daemon_public_base_url"),
                         bool(args.get("overwrite", False)),
                         *mcsm_ids(args),
+                        max_bytes=int(args.get("max_bytes", config.max_bytes)),
                     ),
                 ),
             ),
@@ -616,6 +691,7 @@ def make_tools(config: AppConfig) -> list[Tool]:
                         "local_path": string("Local filesystem path readable by this MCP server."),
                         "remote_name": string("Optional remote filename."),
                         "daemon_public_base_url": string("Optional daemon base URL override, for example http://host:24444."),
+                        "max_bytes": integer("Maximum accepted upload size in bytes.", default=config.max_bytes),
                     }
                 ),
                 ["upload_dir", "local_path"],
@@ -630,6 +706,7 @@ def make_tools(config: AppConfig) -> list[Tool]:
                         "upload_dir": args.get("upload_dir"),
                         "local_path": args.get("local_path"),
                         "remote_name": args.get("remote_name"),
+                        "max_bytes": int(args.get("max_bytes", config.max_bytes)),
                         "instance": id_preview(config, args),
                     },
                     lambda: mcsm.upload_local_file(
@@ -638,6 +715,7 @@ def make_tools(config: AppConfig) -> list[Tool]:
                         args.get("remote_name"),
                         args.get("daemon_public_base_url"),
                         *mcsm_ids(args),
+                        max_bytes=int(args.get("max_bytes", config.max_bytes)),
                     ),
                 ),
             ),
@@ -652,7 +730,7 @@ def make_tools(config: AppConfig) -> list[Tool]:
                         "upload_dir": string("Instance directory path to upload into."),
                         "remote_name": string("Optional remote filename."),
                         "daemon_public_base_url": string("Optional daemon base URL override, for example http://host:24444."),
-                        "max_bytes": integer("Maximum accepted remote file size in bytes.", default=268435456),
+                        "max_bytes": integer("Maximum accepted remote file size in bytes.", default=config.max_bytes),
                     }
                 ),
                 ["url", "upload_dir"],
@@ -667,7 +745,7 @@ def make_tools(config: AppConfig) -> list[Tool]:
                         "url": args.get("url"),
                         "upload_dir": args.get("upload_dir"),
                         "remote_name": args.get("remote_name"),
-                        "max_bytes": int(args.get("max_bytes", 268435456)),
+                        "max_bytes": int(args.get("max_bytes", config.max_bytes)),
                         "instance": id_preview(config, args),
                     },
                     lambda: mcsm.upload_url_file(
@@ -675,7 +753,7 @@ def make_tools(config: AppConfig) -> list[Tool]:
                         require_str(args, "upload_dir"),
                         args.get("remote_name"),
                         args.get("daemon_public_base_url"),
-                        int(args.get("max_bytes", 268435456)),
+                        int(args.get("max_bytes", config.max_bytes)),
                         *mcsm_ids(args),
                     ),
                 ),
@@ -837,6 +915,258 @@ def make_tools(config: AppConfig) -> list[Tool]:
                     ),
                 ),
             ),
+        ),
+        Tool(
+            "modpack.inspect_jar",
+            "Inspect one Minecraft mod jar and extract loader metadata, mod ids, versions, dependencies, and sha256.",
+            schema(
+                id_props(
+                    {
+                        "local_path": string("Local jar path on the MCP server. Mutually exclusive with remote_path."),
+                        "remote_path": string("Jar path inside the MCSManager instance. Mutually exclusive with local_path."),
+                        "daemon_public_base_url": string("Optional daemon base URL override for remote_path downloads."),
+                        "max_bytes": integer("Maximum accepted jar size in bytes for remote_path.", default=config.max_bytes),
+                    }
+                )
+            ),
+            wrap(
+                "modpack.inspect_jar",
+                lambda args: modpack.inspect_jar(
+                    local_path=args.get("local_path"),
+                    remote_path=args.get("remote_path"),
+                    daemon_public_base_url=args.get("daemon_public_base_url"),
+                    daemon_id=args.get("daemonId"),
+                    uuid=args.get("uuid"),
+                    max_bytes=int(args.get("max_bytes", config.max_bytes)),
+                ),
+            ),
+        ),
+        Tool(
+            "modpack.snapshot_modlist",
+            "Create a structured snapshot of a mods directory, optionally saving it under the modpack workspace.",
+            schema(
+                id_props(
+                    {
+                        "mods_dir": string("Remote instance mods directory.", default="mods"),
+                        "local_dir": string("Local mods directory on the MCP server. If set, remote mods_dir is ignored."),
+                        "recursive": boolean("Scan nested directories too.", default=False),
+                        "remote_paths": array("Explicit remote jar paths to snapshot when directory listing is unreliable.", {"type": "string"}),
+                        "save": boolean("Save the snapshot JSON under MINECRAFT_OPS_MODPACK_WORKSPACE.", default=True),
+                        "snapshot_name": string("Optional human-readable snapshot name."),
+                        "minecraft_version": string("Optional target Minecraft version annotation."),
+                        "loader": string("Optional loader annotation, for example fabric, forge, neoforge, quilt."),
+                        "notes": string("Optional operator notes."),
+                        "daemon_public_base_url": string("Optional daemon base URL override for remote jar downloads."),
+                        "max_bytes": integer("Maximum accepted jar size in bytes for each remote jar.", default=config.max_bytes),
+                    }
+                )
+            ),
+            wrap(
+                "modpack.snapshot_modlist",
+                lambda args: modpack.snapshot_modlist(
+                    mods_dir=args.get("mods_dir", "mods"),
+                    local_dir=args.get("local_dir"),
+                    recursive=bool(args.get("recursive", False)),
+                    save=bool(args.get("save", True)),
+                    remote_paths=args.get("remote_paths"),
+                    snapshot_name=args.get("snapshot_name"),
+                    minecraft_version=args.get("minecraft_version"),
+                    loader=args.get("loader"),
+                    notes=args.get("notes"),
+                    daemon_public_base_url=args.get("daemon_public_base_url"),
+                    daemon_id=args.get("daemonId"),
+                    uuid=args.get("uuid"),
+                    max_bytes=int(args.get("max_bytes", config.max_bytes)),
+                ),
+            ),
+        ),
+        Tool(
+            "modpack.diff_snapshots",
+            "Diff two modpack snapshots by jar file and parsed mod id/version metadata.",
+            schema(
+                {
+                    "before": {"type": "object", "description": "Inline before snapshot object.", "additionalProperties": True},
+                    "after": {"type": "object", "description": "Inline after snapshot object.", "additionalProperties": True},
+                    "before_path": string("Path to before snapshot JSON under MINECRAFT_OPS_MODPACK_WORKSPACE."),
+                    "after_path": string("Path to after snapshot JSON under MINECRAFT_OPS_MODPACK_WORKSPACE."),
+                    "before_snapshot_id": string("Before snapshot id saved under workspace/snapshots."),
+                    "after_snapshot_id": string("After snapshot id saved under workspace/snapshots."),
+                }
+            ),
+            wrap(
+                "modpack.diff_snapshots",
+                lambda args: modpack.diff_snapshots(
+                    before=args.get("before"),
+                    after=args.get("after"),
+                    before_path=args.get("before_path"),
+                    after_path=args.get("after_path"),
+                    before_snapshot_id=args.get("before_snapshot_id"),
+                    after_snapshot_id=args.get("after_snapshot_id"),
+                ),
+            ),
+        ),
+        Tool(
+            "modpack.apply_modlist",
+            "Apply a desired modlist snapshot or lockfile to an MCSManager instance mods directory. Requires confirm=true or dry_run=true.",
+            confirm_schema(
+                id_props(
+                    {
+                        "manifest": {"type": "object", "description": "Inline desired modlist snapshot or lockfile.", "additionalProperties": True},
+                        "manifest_path": string("Path to desired manifest JSON under MINECRAFT_OPS_MODPACK_WORKSPACE."),
+                        "snapshot_id": string("Saved snapshot id to apply from workspace/snapshots."),
+                        "mods_dir": string("Remote instance mods directory to manage.", default="mods"),
+                        "clean_extra": boolean("Delete remote jar files that are not present in the desired manifest.", default=True),
+                        "recursive": boolean("Compare nested jar paths under mods_dir too.", default=False),
+                        "current_paths": array("Explicit current remote jar paths when directory listing is unreliable.", {"type": "string"}),
+                        "before_snapshot_name": string("Optional name for the automatic before-apply rollback snapshot."),
+                        "after_snapshot_name": string("Optional name for the automatic after-apply snapshot."),
+                        "daemon_public_base_url": string("Optional daemon base URL override for jar downloads/uploads."),
+                        "max_bytes": integer("Maximum accepted jar size in bytes.", default=config.max_bytes),
+                    }
+                )
+            ),
+            wrap("modpack.apply_modlist", apply_modlist_tool),
+        ),
+        Tool(
+            "modpack.rollback_snapshot",
+            "Restore an MCSManager instance mods directory to a saved modpack snapshot. Requires confirm=true or dry_run=true.",
+            confirm_schema(
+                id_props(
+                    {
+                        "snapshot": {"type": "object", "description": "Inline snapshot object to roll back to.", "additionalProperties": True},
+                        "snapshot_path": string("Path to snapshot JSON under MINECRAFT_OPS_MODPACK_WORKSPACE."),
+                        "snapshot_id": string("Saved snapshot id under workspace/snapshots."),
+                        "mods_dir": string("Remote instance mods directory to restore.", default="mods"),
+                        "clean_extra": boolean("Delete remote jar files that are not present in the rollback snapshot.", default=True),
+                        "recursive": boolean("Compare nested jar paths under mods_dir too.", default=False),
+                        "current_paths": array("Explicit current remote jar paths when directory listing is unreliable.", {"type": "string"}),
+                        "before_snapshot_name": string("Optional name for the automatic before-rollback snapshot."),
+                        "after_snapshot_name": string("Optional name for the automatic after-rollback snapshot."),
+                        "daemon_public_base_url": string("Optional daemon base URL override for jar downloads/uploads."),
+                        "max_bytes": integer("Maximum accepted jar size in bytes.", default=config.max_bytes),
+                    }
+                )
+            ),
+            wrap("modpack.rollback_snapshot", rollback_snapshot_tool),
+        ),
+        Tool(
+            "modpack.classify_startup_result",
+            "Classify Minecraft startup logs or crash reports into common modpack compatibility failure categories.",
+            schema(
+                id_props(
+                    {
+                        "log_text": string("Inline latest.log excerpt or full text."),
+                        "crash_text": string("Inline crash report excerpt or full text."),
+                        "log_path": string("Remote latest.log path inside the MCSManager instance."),
+                        "crash_report_path": string("Remote crash report path inside the MCSManager instance."),
+                        "max_chars": integer("Maximum trailing characters to analyze.", default=262144),
+                    }
+                )
+            ),
+            wrap(
+                "modpack.classify_startup_result",
+                lambda args: modpack.classify_startup_result(
+                    log_text=args.get("log_text"),
+                    crash_text=args.get("crash_text"),
+                    log_path=args.get("log_path"),
+                    crash_report_path=args.get("crash_report_path"),
+                    daemon_id=args.get("daemonId"),
+                    uuid=args.get("uuid"),
+                    max_chars=int(args.get("max_chars", 262144)),
+                ),
+            ),
+            output_schema=STARTUP_CLASSIFICATION_OUTPUT_SCHEMA,
+        ),
+        Tool(
+            "modpack.record_test_run",
+            "Record one modpack compatibility test run with snapshot references, classification, notes, and trace metadata.",
+            schema(
+                {
+                    "run_name": string("Optional human-readable test run name."),
+                    "scenario": string("Scenario or matrix cell name, for example sodium-iris-candidate-a."),
+                    "outcome": string("Outcome such as passed, failed, blocked, rolled_back, or unknown."),
+                    "target": {"type": "object", "description": "Instance/runtime target metadata.", "additionalProperties": True},
+                    "candidate": {"type": "object", "description": "Candidate modlist or version-combination metadata.", "additionalProperties": True},
+                    "before_snapshot": {"type": "object", "description": "Inline before snapshot object.", "additionalProperties": True},
+                    "before_snapshot_path": string("Path to before snapshot JSON under MINECRAFT_OPS_MODPACK_WORKSPACE."),
+                    "before_snapshot_id": string("Before snapshot id saved under workspace/snapshots."),
+                    "after_snapshot": {"type": "object", "description": "Inline after snapshot object.", "additionalProperties": True},
+                    "after_snapshot_path": string("Path to after snapshot JSON under MINECRAFT_OPS_MODPACK_WORKSPACE."),
+                    "after_snapshot_id": string("After snapshot id saved under workspace/snapshots."),
+                    "apply_result": {"type": "object", "description": "Result returned by modpack.apply_modlist.", "additionalProperties": True},
+                    "rollback_result": {"type": "object", "description": "Result returned by modpack.rollback_snapshot.", "additionalProperties": True},
+                    "classification": {"type": "object", "description": "Result returned by modpack.classify_startup_result.", "additionalProperties": True},
+                    "log_excerpt": string("Small log excerpt to store with the run record."),
+                    "crash_excerpt": string("Small crash-report excerpt to store with the run record."),
+                    "notes": string("Operator or agent notes."),
+                    "tags": array("Tags for filtering runs.", {"type": "string"}),
+                    "external_references": array("External references consulted by the agent.", {"type": "object", "additionalProperties": True}),
+                    "metadata": {"type": "object", "description": "Additional structured metadata.", "additionalProperties": True},
+                }
+            ),
+            wrap(
+                "modpack.record_test_run",
+                lambda args: modpack.record_test_run(
+                    run_name=args.get("run_name"),
+                    scenario=args.get("scenario"),
+                    outcome=args.get("outcome"),
+                    target=args.get("target"),
+                    candidate=args.get("candidate"),
+                    before_snapshot=args.get("before_snapshot"),
+                    before_snapshot_path=args.get("before_snapshot_path"),
+                    before_snapshot_id=args.get("before_snapshot_id"),
+                    after_snapshot=args.get("after_snapshot"),
+                    after_snapshot_path=args.get("after_snapshot_path"),
+                    after_snapshot_id=args.get("after_snapshot_id"),
+                    apply_result=args.get("apply_result"),
+                    rollback_result=args.get("rollback_result"),
+                    classification=args.get("classification"),
+                    log_excerpt=args.get("log_excerpt"),
+                    crash_excerpt=args.get("crash_excerpt"),
+                    notes=args.get("notes"),
+                    tags=args.get("tags"),
+                    external_references=args.get("external_references"),
+                    metadata=args.get("metadata"),
+                ),
+            ),
+            output_schema=TEST_RUN_RECORD_OUTPUT_SCHEMA,
+        ),
+        Tool(
+            "modpack.list_test_runs",
+            "List saved modpack compatibility test run records from the modpack workspace.",
+            schema(
+                {
+                    "limit": integer("Maximum number of runs to return.", default=20),
+                    "outcome": string("Optional exact outcome filter."),
+                    "scenario": string("Optional exact scenario filter."),
+                    "tag": string("Optional tag filter."),
+                }
+            ),
+            wrap(
+                "modpack.list_test_runs",
+                lambda args: modpack.list_test_runs(
+                    limit=int(args.get("limit", 20)),
+                    outcome=args.get("outcome"),
+                    scenario=args.get("scenario"),
+                    tag=args.get("tag"),
+                ),
+            ),
+            output_schema=TEST_RUN_LIST_OUTPUT_SCHEMA,
+        ),
+        Tool(
+            "modpack.get_test_run",
+            "Read a saved modpack compatibility test run record by run id or workspace path.",
+            schema(
+                {
+                    "run_id": string("Saved test run id under workspace/runs."),
+                    "run_path": string("Path to test run JSON under MINECRAFT_OPS_MODPACK_WORKSPACE."),
+                }
+            ),
+            wrap(
+                "modpack.get_test_run",
+                lambda args: modpack.get_test_run(run_id=args.get("run_id"), run_path=args.get("run_path")),
+            ),
+            output_schema=TEST_RUN_GET_OUTPUT_SCHEMA,
         ),
         Tool(
             "rcon.command",
@@ -1335,7 +1665,17 @@ def _tool_annotations(name: str) -> dict:
     read_only = (
         name.startswith(("server.get_", "server.list_", "file.list", "file.read", "msmp.discover"))
         or name.endswith((".get", ".list", ".status"))
-        or name in {"rcon.list_players", "rcon.time_query", "resources.list"}
+        or name
+        in {
+            "rcon.list_players",
+            "rcon.time_query",
+            "resources.list",
+            "modpack.inspect_jar",
+            "modpack.diff_snapshots",
+            "modpack.classify_startup_result",
+            "modpack.list_test_runs",
+            "modpack.get_test_run",
+        }
     )
     return {
         "title": _tool_title(name),
@@ -1349,6 +1689,69 @@ def _tool_annotations(name: str) -> dict:
 GENERIC_TOOL_OUTPUT_SCHEMA: dict = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
+    "additionalProperties": True,
+}
+
+STARTUP_CLASSIFICATION_OUTPUT_SCHEMA: dict = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["kind", "status", "category", "confidence", "summary"],
+    "properties": {
+        "schemaVersion": {"type": "integer"},
+        "kind": {"const": "modpackStartupClassification"},
+        "status": {"type": "string", "enum": ["success", "failure", "unknown"]},
+        "category": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "matchedCategories": {"type": "array", "items": {"type": "string"}},
+        "signatures": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "recommendedNext": {"type": "array", "items": {"type": "string"}},
+        "sources": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        "summary": {"type": "object", "additionalProperties": True},
+    },
+    "additionalProperties": True,
+}
+
+TEST_RUN_RECORD_OUTPUT_SCHEMA: dict = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["kind", "runId", "runPath", "record", "summary"],
+    "properties": {
+        "schemaVersion": {"type": "integer"},
+        "kind": {"const": "modpackTestRunRecordResult"},
+        "runId": {"type": "string"},
+        "runPath": {"type": "string"},
+        "record": {"type": "object", "additionalProperties": True},
+        "summary": {"type": "object", "additionalProperties": True},
+    },
+    "additionalProperties": True,
+}
+
+TEST_RUN_LIST_OUTPUT_SCHEMA: dict = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["kind", "runs", "count"],
+    "properties": {
+        "schemaVersion": {"type": "integer"},
+        "kind": {"const": "modpackTestRunList"},
+        "runs": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        "count": {"type": "integer"},
+        "limit": {"type": "integer"},
+        "workspace": {"type": "string"},
+    },
+    "additionalProperties": True,
+}
+
+TEST_RUN_GET_OUTPUT_SCHEMA: dict = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["kind", "run", "summary"],
+    "properties": {
+        "schemaVersion": {"type": "integer"},
+        "kind": {"const": "modpackTestRun"},
+        "run": {"type": "object", "additionalProperties": True},
+        "summary": {"type": "object", "additionalProperties": True},
+    },
     "additionalProperties": True,
 }
 

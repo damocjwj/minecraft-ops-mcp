@@ -3,19 +3,25 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import posixpath
 import tempfile
-import uuid as uuidlib
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse, urlencode
 from urllib.request import Request, urlopen
 
+import httpx
+
 from ..config import AppConfig
 from ..errors import ConfigError, OpsError
 
 
+CHUNK_SIZE = 1024 * 1024
+
+
 class McsmClient:
     def __init__(self, config: AppConfig) -> None:
+        self.app_config = config
         self.config = config.mcsm
 
     def _require_enabled(self) -> None:
@@ -223,7 +229,18 @@ class McsmClient:
         daemon_public_base_url: str | None = None,
         daemon_id: str | None = None,
         uuid: str | None = None,
+        max_bytes: int | None = None,
+        validate_local_path: bool = True,
     ) -> Any:
+        self._ensure_remote_path_allowed(upload_dir, "file.upload_local upload_dir")
+        if validate_local_path:
+            resolved_path = self._ensure_local_path_allowed(local_path, "file.upload_local local_path")
+        else:
+            resolved_path = os.path.realpath(os.path.abspath(local_path))
+        transfer_limit = _effective_max_bytes(max_bytes, self.app_config.max_bytes)
+        file_size = _file_size(resolved_path)
+        if file_size > transfer_limit:
+            raise OpsError(f"Local upload exceeds max_bytes={transfer_limit}.")
         config = self.prepare_upload(upload_dir, daemon_id, uuid)
         data = config.get("data", {}) if isinstance(config, dict) else {}
         password = data.get("password")
@@ -231,46 +248,28 @@ class McsmClient:
         if not password or not addr:
             raise OpsError(f"MCSManager upload config was incomplete: {config}")
         upload_url = _daemon_url(self.config.base_url, addr, daemon_public_base_url, f"/upload/{password}")
-        file_name = remote_name or os.path.basename(local_path)
+        file_name = remote_name or os.path.basename(resolved_path)
         content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
-        boundary = f"----minecraft-ops-mcp-{uuidlib.uuid4().hex}"
         try:
-            with open(local_path, "rb") as handle:
-                file_bytes = handle.read()
+            with httpx.Client(timeout=self.config.timeout_seconds) as client:
+                with open(resolved_path, "rb") as handle:
+                    files = {"file": (file_name, handle, content_type)}
+                    response = client.post(upload_url, files=files)
+                    response.raise_for_status()
+                    text = response.text
+        except httpx.HTTPStatusError as exc:
+            raise OpsError(f"MCSManager daemon upload HTTP {exc.response.status_code}: {exc.response.text}") from exc
+        except httpx.HTTPError as exc:
+            raise OpsError(f"MCSManager daemon upload failed: {exc}") from exc
         except OSError as exc:
             raise OpsError(f"Unable to read local file for upload: {exc}") from exc
-        body = b"".join(
-            [
-                f"--{boundary}\r\n".encode("ascii"),
-                f'Content-Disposition: form-data; name="file"; filename="{file_name}"\r\n'.encode("utf-8"),
-                f"Content-Type: {content_type}\r\n\r\n".encode("ascii"),
-                file_bytes,
-                b"\r\n",
-                f"--{boundary}--\r\n".encode("ascii"),
-            ]
-        )
-        request = Request(
-            upload_url,
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=self.config.timeout_seconds) as response:
-                raw = response.read()
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise OpsError(f"MCSManager daemon upload HTTP {exc.code}: {detail}") from exc
-        except URLError as exc:
-            raise OpsError(f"MCSManager daemon upload failed: {exc.reason}") from exc
-        text = raw.decode("utf-8", errors="replace")
         return {
             "status": 200,
             "data": {
                 "uploadDir": upload_dir,
                 "remoteName": file_name,
-                "bytes": len(file_bytes),
-                "daemonUploadUrl": upload_url,
+                "bytes": file_size,
+                "daemonUploadUrlSet": bool(upload_url),
                 "response": text,
             },
         }
@@ -281,37 +280,23 @@ class McsmClient:
         upload_dir: str,
         remote_name: str | None = None,
         daemon_public_base_url: str | None = None,
-        max_bytes: int = 256 * 1024 * 1024,
+        max_bytes: int | None = None,
         daemon_id: str | None = None,
         uuid: str | None = None,
     ) -> Any:
+        self._ensure_remote_path_allowed(upload_dir, "file.upload_url upload_dir")
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"}:
             raise OpsError("Only http:// and https:// URLs are supported for file.upload_url.")
+        self._ensure_upload_url_allowed(url)
+        transfer_limit = _effective_max_bytes(max_bytes, self.app_config.max_bytes)
         guessed_name = remote_name or os.path.basename(parsed.path) or "download.bin"
         safe_suffix = os.path.basename(guessed_name) or "download.bin"
         tmp_path = ""
         try:
-            with tempfile.NamedTemporaryFile(prefix="minecraft-ops-mcp-upload-", suffix=f"-{safe_suffix}", delete=False) as tmp:
-                tmp_path = tmp.name
-                total = 0
-                try:
-                    with urlopen(url, timeout=self.config.timeout_seconds) as response:
-                        while True:
-                            chunk = response.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            total += len(chunk)
-                            if total > max_bytes:
-                                raise OpsError(f"Remote file exceeds max_bytes={max_bytes}.")
-                            tmp.write(chunk)
-                except HTTPError as exc:
-                    detail = exc.read().decode("utf-8", errors="replace")
-                    raise OpsError(f"Remote URL HTTP {exc.code}: {detail}") from exc
-                except URLError as exc:
-                    raise OpsError(f"Remote URL download failed: {exc.reason}") from exc
-                except OSError as exc:
-                    raise OpsError(f"Unable to stage remote URL download: {exc}") from exc
+            fd, tmp_path = tempfile.mkstemp(prefix="minecraft-ops-mcp-upload-", suffix=f"-{safe_suffix}")
+            os.close(fd)
+            total = self._stream_url_to_file(url, tmp_path, transfer_limit, enforce_domain_allowlist=True)
             result = self.upload_local_file(
                 upload_dir,
                 tmp_path,
@@ -319,11 +304,13 @@ class McsmClient:
                 daemon_public_base_url,
                 daemon_id,
                 uuid,
+                transfer_limit,
+                validate_local_path=False,
             )
             if isinstance(result, dict):
                 result.setdefault("data", {})
                 if isinstance(result["data"], dict):
-                    result["data"]["sourceUrl"] = url
+                    result["data"]["sourceUrlHost"] = parsed.hostname or ""
                     result["data"]["stagedBytes"] = total
             return result
         finally:
@@ -341,7 +328,11 @@ class McsmClient:
         overwrite: bool = False,
         daemon_id: str | None = None,
         uuid: str | None = None,
+        max_bytes: int | None = None,
+        validate_local_path: bool = True,
     ) -> Any:
+        self._ensure_remote_path_allowed(file_name, "file.download_local file_name")
+        target_path = self._download_target_path(file_name, local_path, validate_local_path=validate_local_path)
         config = self.prepare_download(file_name, daemon_id, uuid)
         data = config.get("data", {}) if isinstance(config, dict) else {}
         password = data.get("password")
@@ -350,46 +341,38 @@ class McsmClient:
             raise OpsError(f"MCSManager download config was incomplete: {config}")
         download_name = os.path.basename(file_name.rstrip("/")) or "download.bin"
         download_url = ""
-        content: bytes | None = None
+        transfer_limit = _effective_max_bytes(max_bytes, self.app_config.max_bytes)
+        total: int | None = None
         last_error = ""
         for path in (f"/download/{password}/{quote(download_name)}", f"/download/{password}"):
             download_url = _daemon_url(self.config.base_url, addr, daemon_public_base_url, path)
             try:
-                with urlopen(download_url, timeout=self.config.timeout_seconds) as response:
-                    content = response.read()
+                total = self._stream_url_to_file(
+                    download_url,
+                    target_path,
+                    transfer_limit,
+                    overwrite=overwrite,
+                    enforce_domain_allowlist=False,
+                )
                 break
-            except HTTPError as exc:
-                detail = exc.read().decode("utf-8", errors="replace")
-                last_error = f"MCSManager daemon download HTTP {exc.code}: {detail}"
-                if exc.code not in {400, 404}:
-                    raise OpsError(last_error) from exc
-            except URLError as exc:
-                last_error = f"MCSManager daemon download failed: {exc.reason}"
-                raise OpsError(last_error) from exc
-        if content is None:
+            except OpsError as exc:
+                last_error = str(exc)
+                if "HTTP 400" not in last_error and "HTTP 404" not in last_error:
+                    raise
+        if total is None:
             raise OpsError(last_error or "MCSManager daemon download failed.")
-        target_path = local_path or os.path.join("/tmp", "minecraft-ops-mcp-downloads", download_name)
-        if os.path.exists(target_path) and not overwrite:
-            raise OpsError(f"Local file already exists: {target_path}. Pass overwrite=true to replace it.")
-        parent = os.path.dirname(target_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        try:
-            with open(target_path, "wb") as handle:
-                handle.write(content)
-        except OSError as exc:
-            raise OpsError(f"Unable to write local download file: {exc}") from exc
         return {
             "status": 200,
             "data": {
                 "fileName": file_name,
                 "localPath": target_path,
-                "bytes": len(content),
-                "daemonDownloadUrl": download_url,
+                "bytes": total,
+                "daemonDownloadUrlSet": bool(download_url),
             },
         }
 
     def write_file(self, target: str, text: str, daemon_id: str | None = None, uuid: str | None = None) -> Any:
+        self._ensure_remote_path_allowed(target, "file.write target")
         daemon, instance = self._ids(daemon_id, uuid)
         return self._request(
             "PUT",
@@ -406,6 +389,7 @@ class McsmClient:
         daemon_id: str | None = None,
         uuid: str | None = None,
     ) -> Any:
+        self._ensure_remote_path_allowed(target, "file.write_new target")
         if not overwrite:
             try:
                 self.read_file(target, daemon_id, uuid)
@@ -416,6 +400,93 @@ class McsmClient:
         touch_result = self.touch(target, daemon_id, uuid)
         write_result = self.write_file(target, text, daemon_id, uuid)
         return {"status": 200, "data": {"target": target, "touch": touch_result, "write": write_result}}
+
+    def _download_target_path(self, file_name: str, local_path: str | None, validate_local_path: bool = True) -> str:
+        download_name = os.path.basename(file_name.rstrip("/")) or "download.bin"
+        target_path = local_path or os.path.join("/tmp", "minecraft-ops-mcp-downloads", download_name)
+        if not validate_local_path:
+            return os.path.realpath(os.path.abspath(target_path))
+        return self._ensure_local_path_allowed(target_path, "file.download_local local_path")
+
+    def _stream_url_to_file(
+        self,
+        url: str,
+        target_path: str,
+        max_bytes: int,
+        overwrite: bool = True,
+        enforce_domain_allowlist: bool = False,
+    ) -> int:
+        if os.path.exists(target_path) and not overwrite:
+            raise OpsError(f"Local file already exists: {target_path}. Pass overwrite=true to replace it.")
+        parent = os.path.dirname(target_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp_path = f"{target_path}.part"
+        total = 0
+        try:
+            with httpx.Client(timeout=self.config.timeout_seconds, follow_redirects=True) as client:
+                with client.stream("GET", url) as response:
+                    if enforce_domain_allowlist:
+                        self._ensure_upload_url_allowed(str(response.url))
+                    response.raise_for_status()
+                    content_length = response.headers.get("content-length")
+                    if content_length:
+                        try:
+                            if int(content_length) > max_bytes:
+                                raise OpsError(f"Remote file exceeds max_bytes={max_bytes}.")
+                        except ValueError:
+                            pass
+                    with open(tmp_path, "wb") as handle:
+                        for chunk in response.iter_bytes(CHUNK_SIZE):
+                            if not chunk:
+                                continue
+                            total += len(chunk)
+                            if total > max_bytes:
+                                raise OpsError(f"Remote file exceeds max_bytes={max_bytes}.")
+                            handle.write(chunk)
+            os.replace(tmp_path, target_path)
+            return total
+        except httpx.HTTPStatusError as exc:
+            raise OpsError(f"HTTP {exc.response.status_code}: {exc.response.text}") from exc
+        except httpx.HTTPError as exc:
+            raise OpsError(f"HTTP request failed: {exc}") from exc
+        except OSError as exc:
+            raise OpsError(f"Unable to write local file: {exc}") from exc
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    def _ensure_local_path_allowed(self, path: str, operation: str) -> str:
+        resolved = os.path.realpath(os.path.abspath(path))
+        allowed_dirs = tuple(os.path.realpath(os.path.abspath(item)) for item in self.app_config.upload_allowed_dirs)
+        if not allowed_dirs:
+            return resolved
+        if any(resolved == allowed or resolved.startswith(f"{allowed}{os.sep}") for allowed in allowed_dirs):
+            return resolved
+        raise OpsError(f"{operation} is outside MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS.")
+
+    def _ensure_remote_path_allowed(self, path: str, operation: str) -> str:
+        whitelist = self.app_config.file_operation_whitelist
+        if not whitelist:
+            return _normalize_remote_path(path)
+        normalized = _normalize_remote_path(path)
+        allowed_paths = tuple(_normalize_remote_path(item) for item in whitelist)
+        if any(_remote_path_matches(normalized, allowed) for allowed in allowed_paths):
+            return normalized
+        raise OpsError(f"{operation} is outside MINECRAFT_OPS_FILE_OPERATION_WHITELIST.")
+
+    def _ensure_upload_url_allowed(self, url: str) -> None:
+        allowed_domains = self.app_config.upload_url_allowed_domains
+        if not allowed_domains:
+            return
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+        if any(_domain_matches(hostname, allowed.lower()) for allowed in allowed_domains):
+            return
+        raise OpsError("URL host is not allowed by MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS.")
 
     def delete_files(self, targets: list[str], daemon_id: str | None = None, uuid: str | None = None) -> Any:
         daemon, instance = self._ids(daemon_id, uuid)
@@ -506,3 +577,38 @@ def _daemon_url(panel_base_url: str, addr: str, override: str | None, path: str)
     if host in {"localhost", "127.0.0.1", "::1"} and parsed.hostname:
         host_port = f"{parsed.hostname}{sep}{port}" if sep else parsed.hostname
     return f"{scheme}://{host_port}{path}"
+
+
+def _file_size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError as exc:
+        raise OpsError(f"Unable to stat local file: {exc}") from exc
+
+
+def _effective_max_bytes(override: int | None, configured: int) -> int:
+    value = configured if override is None else override
+    if value <= 0:
+        raise OpsError("max_bytes must be a positive integer.")
+    return value
+
+
+def _normalize_remote_path(path: str) -> str:
+    raw = path.replace("\\", "/")
+    if any(part == ".." for part in raw.split("/")):
+        raise OpsError("Remote file path must not escape its instance root.")
+    normalized = posixpath.normpath(raw).lstrip("/")
+    if normalized == ".":
+        return ""
+    return normalized
+
+
+def _remote_path_matches(path: str, allowed: str) -> bool:
+    if allowed in {"", "."}:
+        return True
+    return path == allowed or path.startswith(f"{allowed.rstrip('/')}/")
+
+
+def _domain_matches(hostname: str, allowed: str) -> bool:
+    allowed = allowed.lstrip(".")
+    return hostname == allowed or hostname.endswith(f".{allowed}")

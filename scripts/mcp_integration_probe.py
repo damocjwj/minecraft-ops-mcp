@@ -4,7 +4,9 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
+import zipfile
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -202,7 +204,7 @@ def run_probe(probe: McpProbe) -> None:
     probe.notify("notifications/initialized")
     tools = probe.expect_ok("tools/list", lambda: probe.request("tools/list")["result"]["tools"])
     names = {item["name"] for item in tools or []}
-    probe.results.append(ProbeResult("tools/list.count", len(names) >= 71, f"tool_count={len(names)}"))
+    probe.results.append(ProbeResult("tools/list.count", len(names) >= 80, f"tool_count={len(names)}"))
     probe.expect_ok("resources/list", lambda: probe.request("resources/list")["result"]["resources"])
     for uri in ("minecraft-ops://config", "minecraft-ops://safety", "minecraft-ops://tools"):
         probe.expect_ok(f"resources/read:{uri}", lambda uri=uri: probe.request("resources/read", {"uri": uri})["result"])
@@ -258,6 +260,47 @@ def run_probe(probe: McpProbe) -> None:
     probe.expect_ok("file.upload_prepare", lambda: probe.tool("file.upload_prepare", {"upload_dir": base}))
     probe.expect_ok("file.upload_local", lambda: probe.tool("file.upload_local", {"upload_dir": base, "local_path": upload_local, "remote_name": "uploaded-local.txt", "confirm": True}))
     probe.expect_ok("file.upload_url.dry_run", lambda: probe.tool("file.upload_url", {"url": "https://example.com/example.txt", "upload_dir": base, "remote_name": "uploaded-url.txt", "dry_run": True}))
+
+    with tempfile.TemporaryDirectory(prefix="minecraft-ops-mcp-modpack-probe-before-") as before_dir:
+        with tempfile.TemporaryDirectory(prefix="minecraft-ops-mcp-modpack-probe-after-") as after_dir:
+            before_jar = os.path.join(before_dir, "alpha.jar")
+            after_jar = os.path.join(after_dir, "alpha.jar")
+            write_fabric_probe_jar(before_jar, "alpha", "1.0.0")
+            write_fabric_probe_jar(after_jar, "alpha", "1.1.0")
+            probe.expect_ok("modpack.inspect_jar", lambda: probe.tool("modpack.inspect_jar", {"local_path": before_jar}))
+            before_snapshot = probe.expect_ok("modpack.snapshot_modlist.before", lambda: probe.tool("modpack.snapshot_modlist", {"local_dir": before_dir, "snapshot_name": "probe-before"}))
+            after_snapshot = probe.expect_ok("modpack.snapshot_modlist.after", lambda: probe.tool("modpack.snapshot_modlist", {"local_dir": after_dir, "snapshot_name": "probe-after"}))
+            probe.expect_ok("modpack.diff_snapshots", lambda: probe.tool("modpack.diff_snapshots", {"before": before_snapshot, "after": after_snapshot}))
+            probe.expect_ok("modpack.apply_modlist.dry_run", lambda: probe.tool("modpack.apply_modlist", {"manifest": after_snapshot, "mods_dir": base, "dry_run": True}))
+            probe.expect_ok("modpack.rollback_snapshot.dry_run", lambda: probe.tool("modpack.rollback_snapshot", {"snapshot": before_snapshot, "mods_dir": base, "dry_run": True}))
+            classification = probe.expect_ok(
+                "modpack.classify_startup_result",
+                lambda: probe.tool(
+                    "modpack.classify_startup_result",
+                    {"log_text": "net.fabricmc.loader.impl.discovery.ModResolutionException: Mod alpha requires version >=1.21.1 of minecraft"},
+                ),
+            )
+            scenario = f"{base}-startup"
+            recorded = probe.expect_ok(
+                "modpack.record_test_run",
+                lambda: probe.tool(
+                    "modpack.record_test_run",
+                    {
+                        "run_name": "probe-candidate-a",
+                        "scenario": scenario,
+                        "outcome": "failed",
+                        "before_snapshot": before_snapshot,
+                        "after_snapshot": after_snapshot,
+                        "classification": classification,
+                        "notes": "probe startup classification record",
+                        "tags": ["probe", "startup"],
+                    },
+                ),
+            )
+            if isinstance(recorded, dict):
+                probe.expect_ok("modpack.list_test_runs", lambda: probe.tool("modpack.list_test_runs", {"scenario": scenario, "limit": 5}))
+                probe.expect_ok("modpack.get_test_run", lambda: probe.tool("modpack.get_test_run", {"run_id": recorded["runId"]}))
+
     probe.expect_ok("file.delete.cleanup", lambda: probe.tool("file.delete", {"targets": [base], "confirm": True}))
     for path in (local_path, upload_local):
         try:
@@ -318,6 +361,18 @@ def run_probe(probe: McpProbe) -> None:
             ("msmp.server_settings.list", {}),
         ]:
             probe.expect_ok(name, lambda name=name, args=args: probe.tool(name, args))
+
+
+def write_fabric_probe_jar(path: str, mod_id: str, version: str) -> None:
+    metadata = {
+        "schemaVersion": 1,
+        "id": mod_id,
+        "version": version,
+        "name": mod_id.title(),
+        "depends": {"minecraft": "~1.21.1", "fabricloader": ">=0.16.0"},
+    }
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("fabric.mod.json", json.dumps(metadata))
 
 
 if __name__ == "__main__":

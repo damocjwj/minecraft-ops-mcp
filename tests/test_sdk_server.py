@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import threading
 
 import mcp.types as types
 
@@ -98,6 +99,23 @@ class SdkServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.isError)
         self.assertEqual(result.structuredContent, {"hello": "Alex"})
         self.assertEqual(result.content[0].type, "text")
+
+    async def test_tool_handler_runs_in_worker_thread(self) -> None:
+        loop_thread_id = threading.get_ident()
+        tools = [
+            Tool(
+                name="demo.thread",
+                description="Demo tool.",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                output_schema={"type": "object", "additionalProperties": True},
+                handler=lambda args: {"threadId": threading.get_ident()},
+            )
+        ]
+        server = make_mcp_server(AppConfig.from_env(), tools, [], [])
+        await server.request_handlers[types.ListToolsRequest](types.ListToolsRequest())
+        request = types.CallToolRequest(params={"name": "demo.thread", "arguments": {}})
+        response = await server.request_handlers[types.CallToolRequest](request)
+        self.assertNotEqual(response.root.structuredContent["threadId"], loop_thread_id)
 
     async def test_sdk_input_validation_returns_tool_error(self) -> None:
         server = self.make_server()

@@ -26,6 +26,8 @@ HIGH_RISK_TOOLS = {
     "file.download_local",
     "file.upload_local",
     "file.upload_url",
+    "modpack.apply_modlist",
+    "modpack.rollback_snapshot",
     "rcon.command",
     "msmp.call",
     "msmp.server.save",

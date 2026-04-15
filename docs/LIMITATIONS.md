@@ -31,8 +31,8 @@
 
 已覆盖实例、文件、日志、上传下载 token、上传本地文件、生命周期等主要功能，但仍有缺口：
 
-- 已增加 `file.download_local`，但下载 URL 的 daemon 路径仍需继续在更多 MCSManager 版本上回归。
-- 已增加 `file.upload_url`，但它是在 MCP 服务侧先下载临时文件再上传，不是让 MCSManager daemon 直接从 URL 拉取。
+- 已增加 `file.download_local`，并改为流式写入 MCP 本机路径；下载 URL 的 daemon 路径仍需继续在更多 MCSManager 版本上回归。
+- 已增加 `file.upload_url`，并改为流式下载到临时文件再流式上传；它仍不是让 MCSManager daemon 直接从 URL 拉取。
 - `file.write` 对 MCSManager 的路径规则比较敏感。实测相对路径更稳定，`/xxx` 可能报 `Illegal access path`。
 - 某些实例上 `file.list` 返回正确 `absolutePath` 但 `items` 为空；其他文件 API 仍可工作。这可能是 MCSManager 版本或接口行为，需要进一步定位。
 - 已增加 `file.write_new`，内部执行 `touch -> write`，但仍不能完全规避所有 MCSManager 路径策略差异。
@@ -88,16 +88,42 @@
 - 没有对 MCSManager API key 做权限约束检查。
 - 审计日志是本地 JSONL，没有轮转、签名或集中化。
 - 原始命令只限制单行，没有语义级危险命令识别。
-- 上传本地文件允许读取 MCP 进程有权限读取的路径，需要依赖运行环境隔离。
+- 已支持 `MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS`、`MINECRAFT_OPS_FILE_OPERATION_WHITELIST` 和 `MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS`，但默认空白名单表示不限制；生产环境应显式配置。
 
 后续建议：
 
 - 增加策略配置文件，例如允许哪些工具、哪些实例、哪些路径。
-- 增加路径沙箱，限制 `file.upload_local` 只能读取指定目录。
+- 将路径/域名策略从环境变量扩展为可审计的策略文件，并覆盖更多文件操作。
 - 增加危险命令 denylist，例如 `stop`、`op`、`deop`、`ban-ip`、`whitelist off` 等需要更强确认。
 - 审计日志增加调用 ID、客户端名、耗时、结果摘要和轮转。
 
-## 6. 测试覆盖不足
+## 6. 整合包兼容性工具不足
+
+当前已具备第一、二、三阶段能力：
+
+- `modpack.inspect_jar`：解析本地或实例内 jar 的 loader 元数据、mod id、版本、依赖和 sha256。
+- `modpack.snapshot_modlist`：扫描本地或实例内 `mods` 目录并保存快照 JSON；默认缓存 jar 内容供回滚使用。
+- `modpack.diff_snapshots`：比较两个快照的 jar 文件、mod id、版本和 hash 差异。
+- `modpack.apply_modlist`：应用目标快照/lockfile 到实例 `mods` 目录，并自动生成 before/after 快照。
+- `modpack.rollback_snapshot`：将实例 `mods` 目录恢复到目标快照。
+- `modpack.classify_startup_result`：按常见启动/崩溃签名分类兼容性失败。
+- `modpack.record_test_run`、`modpack.list_test_runs`、`modpack.get_test_run`：记录、检索和追溯测试运行。
+
+仍未覆盖：
+
+- 不联网查询 Modrinth / CurseForge / GitHub Releases；外部版本兼容资料仍由 agent 或 skill 负责。
+- 不自动生成版本组合矩阵。
+- 不自动启动临时实例、自动判定所有测试步骤或自动运行完整组合矩阵；测试运行记录需要 agent 或用户按流程写入。
+- 对嵌套 jar、复杂多 mod jar、非标准元数据和 loader 特定版本表达式只做保守解析。
+- 启动结果分类基于日志签名，无法保证定位唯一根因；应优先结合第一条 causal exception、快照 diff 和外部发布说明判断。
+- 某些 MCSManager 版本的目录 listing 可能返回空；此时需要用 `remote_paths` / `current_paths` 显式传入已知 jar 路径，否则 apply/rollback 无法发现额外 jar。
+
+后续建议：
+
+- 增加 lockfile schema 文档和 JSON Schema 校验。
+- 增加版本组合矩阵生成与批量执行计划。
+
+## 7. 测试覆盖不足
 
 目前已有基础单元测试和真实环境集成探针，但仍缺少隔离测试资产：
 
@@ -111,7 +137,7 @@
 - 为 adapters 建 fake server 测 HTTP/WebSocket/RCON 边界。
 - 把当前真实环境测试流程整理为可选的 `scripts/smoke_test.py`，由环境变量启用。
 
-## 7. 运维体验不足
+## 8. 运维体验不足
 
 当前项目已经可用，但使用体验还有提升空间：
 
@@ -128,7 +154,7 @@
 - 增加 `mcsm.minecraft.create_vanilla_instance` 模板工具。
 - 增加 `backup.create`、`backup.list`、`backup.restore`。
 
-## 8. 当前实测注意点
+## 9. 当前实测注意点
 
 真实测试中观察到：
 

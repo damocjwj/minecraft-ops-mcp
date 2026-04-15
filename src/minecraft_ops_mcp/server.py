@@ -141,7 +141,7 @@ def make_mcp_server(config: AppConfig, tools: list[Tool], resources: list[Resour
         if tool is None:
             return _tool_error(f"Unknown tool: {name}")
         try:
-            result = tool.handler(arguments or {})
+            result = await anyio.to_thread.run_sync(tool.handler, arguments or {})
         except OpsError as exc:
             return _tool_error(str(exc))
         except Exception as exc:  # noqa: BLE001

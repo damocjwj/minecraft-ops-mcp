@@ -12,6 +12,13 @@
 - Raw commands are single-line only and can be constrained with:
   - `MINECRAFT_OPS_RAW_COMMAND_ALLOWLIST`
   - `MINECRAFT_OPS_RAW_COMMAND_DENYLIST`
+- File transfer and file write scope can be constrained with:
+  - `MINECRAFT_OPS_MAX_BYTES`
+  - `MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS`
+  - `MINECRAFT_OPS_FILE_OPERATION_WHITELIST`
+  - `MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS`
+- Modpack snapshot reads are constrained by `MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS` for local jar inspection and by `MINECRAFT_OPS_MODPACK_WORKSPACE` for saved snapshot paths.
+- `modpack.apply_modlist` and `modpack.rollback_snapshot` are high-risk tools because they can upload and delete jars under the target mods directory; always review their dry-run plan first.
 
 ## Operational Recommendations
 
@@ -21,6 +28,8 @@
 - Do not commit `.env`, API keys, RCON passwords, MSMP secrets, generated reports, or audit logs.
 - Review any action that requires `confirm=true`, especially destructive file and lifecycle operations.
 - Use `dry_run=true` before destructive or broad operations.
+- In production, set local directory, remote path, and URL-domain allowlists instead of relying on empty default allowlists.
+- Put `MINECRAFT_OPS_MODPACK_WORKSPACE` in a private directory and commit exported snapshots to git only after reviewing that they do not contain sensitive local paths.
 
 ## Reporting Issues
 
