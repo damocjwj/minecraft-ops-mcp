@@ -9,6 +9,14 @@ from .adapters.rcon import RconClient
 from .audit import audit
 from .config import AppConfig
 from .errors import OpsError
+from .managed_backends import (
+    extract_text_response,
+    msmp_runtime_config,
+    parse_properties,
+    rcon_runtime_config,
+    update_properties_text,
+    validate_msmp_secret,
+)
 from .models import Tool
 from .modpack import ModpackManager
 from .policy import HIGH_RISK_TOOLS, ensure_plain_command, ensure_raw_command_allowed, guard_high_risk
@@ -65,11 +73,20 @@ def make_tools(config: AppConfig) -> list[Tool]:
     def run_server_save(args: dict) -> Any:
         backend = args.get("backend", "auto")
         flush = bool(args.get("flush", True))
-        if backend == "msmp" or (backend == "auto" and config.msmp.enabled):
-            return msmp.call("minecraft:server/save", [flush])
-        if backend == "rcon" or (backend == "auto" and config.rcon.enabled):
-            return rcon.command("save-all")
-        if backend == "mcsm" or (backend == "auto" and config.mcsm.enabled):
+        if backend == "msmp":
+            return msmp_call(args, "minecraft:server/save", [flush])
+        if backend == "rcon":
+            return rcon.save_all(flush, rcon_runtime(args).connection())
+        if backend == "auto":
+            for attempt in (
+                lambda: msmp_call(args, "minecraft:server/save", [flush]),
+                lambda: rcon.save_all(flush, rcon_runtime(args).connection()),
+            ):
+                try:
+                    return attempt()
+                except OpsError:
+                    pass
+        if backend in {"mcsm", "auto"} and config.mcsm.enabled:
             daemon_id, uuid = mcsm_ids(args)
             return mcsm.send_command("save-all", daemon_id, uuid)
         raise OpsError("No backend configured for save_world.")
@@ -79,18 +96,33 @@ def make_tools(config: AppConfig) -> list[Tool]:
         if "\n" in message or "\r" in message:
             raise OpsError("message must be a single line.")
         backend = args.get("backend", "auto")
-        if backend == "msmp" or (backend == "auto" and config.msmp.enabled):
+        if backend == "msmp":
             params: dict[str, Any] = {"message": {"literal": message}, "overlay": bool(args.get("overlay", False))}
             if "targets" in args:
                 params["receivingPlayers"] = args["targets"]
-            return msmp.call("minecraft:server/system_message", [params])
+            return msmp_call(args, "minecraft:server/system_message", [params])
         command = f"say {message}"
-        if backend == "rcon" or (backend == "auto" and config.rcon.enabled):
-            return rcon.command(command)
-        if backend == "mcsm" or (backend == "auto" and config.mcsm.enabled):
+        if backend == "rcon":
+            return rcon.command(command, rcon_runtime(args).connection())
+        if backend == "auto":
+            for attempt in (
+                lambda: msmp_call(args, "minecraft:server/system_message", [params_from_broadcast_args(args, message)]),
+                lambda: rcon.command(command, rcon_runtime(args).connection()),
+            ):
+                try:
+                    return attempt()
+                except OpsError:
+                    pass
+        if backend in {"mcsm", "auto"} and config.mcsm.enabled:
             daemon_id, uuid = mcsm_ids(args)
             return mcsm.send_command(command, daemon_id, uuid)
         raise OpsError("No backend configured for broadcast.")
+
+    def params_from_broadcast_args(args: dict, message: str) -> dict[str, Any]:
+        params: dict[str, Any] = {"message": {"literal": message}, "overlay": bool(args.get("overlay", False))}
+        if "targets" in args:
+            params["receivingPlayers"] = args["targets"]
+        return params
 
     def player_object(value: Any) -> dict:
         if isinstance(value, str):
@@ -130,6 +162,103 @@ def make_tools(config: AppConfig) -> list[Tool]:
         if not isinstance(config_data, dict):
             raise OpsError("MCSManager instance config was not an object.")
         return dict(config_data)
+
+    def current_instance_config(args: dict) -> dict:
+        return extract_instance_config(mcsm.get_instance(*mcsm_ids(args)))
+
+    def rcon_runtime(args: dict):
+        return rcon_runtime_config(
+            current_instance_config(args),
+            mcsm_base_url=config.mcsm.base_url,
+            timeout_seconds=config.rcon.timeout_seconds,
+            encoding=config.rcon.encoding,
+            connection_host=args.get("connection_host"),
+        )
+
+    def rcon_config_get(args: dict) -> dict[str, Any]:
+        return rcon_runtime(args).redacted()
+
+    def rcon_config_set(args: dict) -> Any:
+        patch: dict[str, Any] = {}
+        if "enabled" in args:
+            patch["enableRcon"] = bool(args["enabled"])
+        if args.get("rcon_ip") is not None:
+            patch["rconIp"] = args.get("rcon_ip")
+        if args.get("rcon_port") is not None:
+            patch["rconPort"] = int(args["rcon_port"])
+        if args.get("rcon_password") is not None:
+            patch["rconPassword"] = args.get("rcon_password")
+        if not patch:
+            raise OpsError("Pass at least one RCON config field to update.")
+        current = current_instance_config(args)
+        merged = deep_merge_dict(current, patch)
+        diff = redact_sensitive_diff(shallow_diff(current, merged))
+        preview_patch = dict(patch)
+        if "rconPassword" in preview_patch:
+            preview_patch["rconPassword"] = "<redacted>"
+        return action(
+            "rcon.config.set",
+            args,
+            {"backend": "mcsm", "target": id_preview(config, args), "patch": preview_patch, "diff": diff},
+            lambda: mcsm.update_instance_config(merged, *mcsm_ids(args)),
+        )
+
+    def server_properties_text(args: dict) -> str:
+        target = args.get("properties_path") or "server.properties"
+        return extract_text_response(mcsm.read_file(target, *mcsm_ids(args)))
+
+    def msmp_runtime(args: dict):
+        return msmp_runtime_config(
+            server_properties_text(args),
+            mcsm_base_url=config.mcsm.base_url,
+            timeout_seconds=config.msmp.timeout_seconds,
+            tls_verify=config.msmp.tls_verify,
+            connection_host=args.get("connection_host"),
+        )
+
+    def msmp_call(args: dict, method: str, params: Any | None = None) -> Any:
+        return msmp.call(method, params, msmp_runtime(args).connection())
+
+    def msmp_config_get(args: dict) -> dict[str, Any]:
+        runtime = msmp_runtime(args)
+        return {**runtime.redacted(), "propertiesPath": args.get("properties_path") or "server.properties"}
+
+    def msmp_config_set(args: dict) -> Any:
+        updates: dict[str, str] = {}
+        if "enabled" in args:
+            updates["management-server-enabled"] = "true" if bool(args["enabled"]) else "false"
+        if args.get("host") is not None:
+            updates["management-server-host"] = str(args["host"])
+        if args.get("port") is not None:
+            updates["management-server-port"] = str(int(args["port"]))
+        if args.get("secret") is not None:
+            secret = str(args["secret"])
+            validate_msmp_secret(secret)
+            updates["management-server-secret"] = secret
+        if "tls_enabled" in args:
+            updates["management-server-tls-enabled"] = "true" if bool(args["tls_enabled"]) else "false"
+        if not updates:
+            raise OpsError("Pass at least one MSMP config field to update.")
+        target = args.get("properties_path") or "server.properties"
+        current_text = server_properties_text(args)
+        updated_text = update_properties_text(current_text, updates)
+        preview_updates = dict(updates)
+        if "management-server-secret" in preview_updates:
+            preview_updates["management-server-secret"] = "<redacted>"
+        before = parse_properties(current_text)
+        after = parse_properties(updated_text)
+        return action(
+            "msmp.config.set",
+            args,
+            {
+                "backend": "mcsm",
+                "target": id_preview(config, args),
+                "propertiesPath": target,
+                "updates": preview_updates,
+                "changedKeys": sorted(key for key in updates if before.get(key) != after.get(key)),
+            },
+            lambda: mcsm.write_file(target, updated_text, *mcsm_ids(args)),
+        )
 
     def update_config_patch(args: dict) -> Any:
         patch = require_dict(args, "patch")
@@ -194,7 +323,7 @@ def make_tools(config: AppConfig) -> list[Tool]:
         return entries
 
     def msmp_server_settings_list(args: dict) -> Any:
-        discover = msmp.discover()
+        discover = msmp_call(args, "rpc.discover")
         methods = sorted(_collect_msmp_methods(discover))
         settings: dict[str, dict[str, Any]] = {}
         for method in methods:
@@ -243,8 +372,19 @@ def make_tools(config: AppConfig) -> list[Tool]:
             "msmp.server_settings.set",
             args,
             {"backend": "msmp", "setting": setting, "value": value},
-            lambda: msmp.call(f"minecraft:serversettings/{setting}/set", [value]),
+            lambda: msmp_call(args, f"minecraft:serversettings/{setting}/set", [value]),
         )
+
+    def msmp_props(extra: dict | None = None) -> dict:
+        props = id_props(
+            {
+                "properties_path": string("Path to server.properties inside the instance.", default="server.properties"),
+                "connection_host": string("Optional connection host override when management-server-host is a bind or loopback address."),
+            }
+        )
+        if extra:
+            props.update(extra)
+        return props
 
     def apply_modlist_tool(args: dict) -> Any:
         plan = modpack.plan_apply_modlist(
@@ -1169,16 +1309,37 @@ def make_tools(config: AppConfig) -> list[Tool]:
             output_schema=TEST_RUN_GET_OUTPUT_SCHEMA,
         ),
         Tool(
+            "rcon.config.get",
+            "Read RCON settings from the MCSManager instance config.",
+            schema(id_props({"connection_host": string("Optional connection host override when rconIp is a bind or loopback address.")})),
+            wrap("rcon.config.get", rcon_config_get),
+        ),
+        Tool(
+            "rcon.config.set",
+            "Update RCON settings in the MCSManager instance config. Requires confirm=true or dry_run=true.",
+            confirm_schema(
+                id_props(
+                    {
+                        "enabled": boolean("Enable or disable RCON."),
+                        "rcon_ip": string("RCON bind IP stored in the MCSManager instance config."),
+                        "rcon_port": integer("RCON port."),
+                        "rcon_password": string("RCON password."),
+                    }
+                )
+            ),
+            wrap("rcon.config.set", rcon_config_set),
+        ),
+        Tool(
             "rcon.command",
             "Send a raw RCON command. Requires confirm=true or dry_run=true.",
-            confirm_schema({"command": string("Single-line RCON command.")}, ["command"]),
+            confirm_schema(id_props({"command": string("Single-line RCON command."), "connection_host": string("Optional connection host override.")}), ["command"]),
             wrap(
                 "rcon.command",
                 lambda args: _run_command_tool(
                     args,
                     "rcon.command",
                     {"backend": "rcon", "command": args.get("command")},
-                    rcon.command,
+                    lambda command: rcon.command(command, rcon_runtime(args).connection()),
                     action,
                     require_str,
                     raw_command_policy,
@@ -1188,36 +1349,60 @@ def make_tools(config: AppConfig) -> list[Tool]:
         Tool(
             "rcon.list_players",
             "List online players through RCON using the fixed list command.",
-            schema({}),
-            wrap("rcon.list_players", lambda args: rcon.list_players()),
+            schema(id_props({"connection_host": string("Optional connection host override.")})),
+            wrap("rcon.list_players", lambda args: rcon.list_players(rcon_runtime(args).connection())),
         ),
         Tool(
             "rcon.time_query",
             "Query server time through RCON using time query daytime/gametime/day.",
-            schema({"query": enum("Time query type.", ["daytime", "gametime", "day"], default="daytime")}),
-            wrap("rcon.time_query", lambda args: rcon.time_query(args.get("query", "daytime"))),
+            schema(id_props({"query": enum("Time query type.", ["daytime", "gametime", "day"], default="daytime"), "connection_host": string("Optional connection host override.")})),
+            wrap("rcon.time_query", lambda args: rcon.time_query(args.get("query", "daytime"), rcon_runtime(args).connection())),
         ),
         Tool(
             "rcon.save_all",
             "Save the world through RCON using save-all or save-all flush.",
-            schema({"flush": boolean("Run save-all flush.", default=False)}),
-            wrap("rcon.save_all", lambda args: rcon.save_all(bool(args.get("flush", False)))),
+            schema(id_props({"flush": boolean("Run save-all flush.", default=False), "connection_host": string("Optional connection host override.")})),
+            wrap("rcon.save_all", lambda args: rcon.save_all(bool(args.get("flush", False)), rcon_runtime(args).connection())),
+        ),
+        Tool(
+            "msmp.config.get",
+            "Read MSMP management-server settings from server.properties through MCSManager.",
+            schema(msmp_props()),
+            wrap("msmp.config.get", msmp_config_get),
+        ),
+        Tool(
+            "msmp.config.set",
+            "Update MSMP management-server settings in server.properties through MCSManager. Requires confirm=true or dry_run=true.",
+            confirm_schema(
+                msmp_props(
+                    {
+                        "enabled": boolean("Enable or disable the management server."),
+                        "host": string("management-server-host value."),
+                        "port": integer("management-server-port value."),
+                        "secret": string("management-server-secret value. Minecraft 1.21.9 expects 40 alphanumeric characters."),
+                        "tls_enabled": boolean("management-server-tls-enabled value."),
+                    }
+                )
+            ),
+            wrap("msmp.config.set", msmp_config_set),
         ),
         Tool(
             "msmp.discover",
             "Call rpc.discover on the Minecraft Server Management Protocol endpoint.",
-            schema({}),
-            wrap("msmp.discover", lambda args: msmp.discover()),
+            schema(msmp_props()),
+            wrap("msmp.discover", lambda args: msmp.discover(msmp_runtime(args).connection())),
         ),
         Tool(
             "msmp.call",
             "Call an arbitrary MSMP JSON-RPC method. Set read_only=true for safe reads; otherwise confirm=true is required.",
             confirm_schema(
-                {
+                msmp_props(
+                    {
                     "method": string("MSMP method, for example minecraft:server/status."),
                     "params": {"description": "Raw JSON-RPC params array or object.", "type": ["array", "object", "string", "number", "boolean", "null"]},
                     "read_only": boolean("Declare this call as read-only to skip confirmation.", default=False),
-                },
+                    }
+                ),
                 ["method"],
             ),
             wrap(
@@ -1226,27 +1411,28 @@ def make_tools(config: AppConfig) -> list[Tool]:
                     "msmp.call",
                     args,
                     {"backend": "msmp", "method": args.get("method"), "params": args.get("params")},
-                    lambda: msmp.call(require_str(args, "method"), args.get("params")),
+                    lambda: msmp_call(args, require_str(args, "method"), args.get("params")),
                 ),
             ),
         ),
         Tool(
             "msmp.players.list",
             "List connected players through MSMP.",
-            schema({}),
-            wrap("msmp.players.list", lambda args: msmp.call("minecraft:players")),
+            schema(msmp_props()),
+            wrap("msmp.players.list", lambda args: msmp_call(args, "minecraft:players")),
         ),
         Tool(
             "msmp.players.kick",
             "Kick one or more players through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({"players": array("Players to kick.", player_schema()), "message": string("Kick message.", default="")}, ["players"]),
+            confirm_schema(msmp_props({"players": array("Players to kick.", player_schema()), "message": string("Kick message.", default="")}), ["players"]),
             wrap(
                 "msmp.players.kick",
                 lambda args: action(
                     "msmp.players.kick",
                     args,
                     {"backend": "msmp", "players": args.get("players")},
-                    lambda: msmp.call(
+                    lambda: msmp_call(
+                        args,
                         "minecraft:players/kick",
                         [
                             [
@@ -1264,53 +1450,53 @@ def make_tools(config: AppConfig) -> list[Tool]:
         Tool(
             "msmp.server.status",
             "Get server status through MSMP.",
-            schema({}),
-            wrap("msmp.server.status", lambda args: msmp.call("minecraft:server/status")),
+            schema(msmp_props()),
+            wrap("msmp.server.status", lambda args: msmp_call(args, "minecraft:server/status")),
         ),
         Tool(
             "msmp.server.save",
             "Save server state through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({"flush": boolean("Whether to flush data to disk.", default=True)}),
+            confirm_schema(msmp_props({"flush": boolean("Whether to flush data to disk.", default=True)})),
             wrap(
                 "msmp.server.save",
                 lambda args: action(
                     "msmp.server.save",
                     args,
                     {"backend": "msmp", "method": "minecraft:server/save", "flush": bool(args.get("flush", True))},
-                    lambda: msmp.call("minecraft:server/save", [bool(args.get("flush", True))]),
+                    lambda: msmp_call(args, "minecraft:server/save", [bool(args.get("flush", True))]),
                 ),
             ),
         ),
         Tool(
             "msmp.server.stop",
             "Stop server through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({}),
+            confirm_schema(msmp_props()),
             wrap(
                 "msmp.server.stop",
                 lambda args: action(
                     "msmp.server.stop",
                     args,
                     {"backend": "msmp", "method": "minecraft:server/stop"},
-                    lambda: msmp.call("minecraft:server/stop"),
+                    lambda: msmp_call(args, "minecraft:server/stop"),
                 ),
             ),
         ),
         Tool(
             "msmp.bans.get",
             "Get the player ban list through MSMP.",
-            schema({}),
-            wrap("msmp.bans.get", lambda args: msmp.call("minecraft:bans")),
+            schema(msmp_props()),
+            wrap("msmp.bans.get", lambda args: msmp_call(args, "minecraft:bans")),
         ),
         Tool(
             "msmp.bans.add",
             "Add player bans through MSMP. Requires confirm=true or dry_run=true.",
             confirm_schema(
-                {
+                msmp_props({
                     "players": array("Players to ban.", player_schema()),
                     "reason": string("Optional ban reason."),
                     "source": string("Optional ban source."),
                     "expires": string("Optional expiration timestamp/string accepted by the server."),
-                },
+                }),
                 ["players"],
             ),
             wrap(
@@ -1319,21 +1505,21 @@ def make_tools(config: AppConfig) -> list[Tool]:
                     "msmp.bans.add",
                     args,
                     {"backend": "msmp", "players": args.get("players"), "reason": args.get("reason")},
-                    lambda: msmp.call("minecraft:bans/add", [ban_objects(args)]),
+                    lambda: msmp_call(args, "minecraft:bans/add", [ban_objects(args)]),
                 ),
             ),
         ),
         Tool(
             "msmp.bans.remove",
             "Remove player bans through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({"players": array("Players to unban.", player_schema())}, ["players"]),
+            confirm_schema(msmp_props({"players": array("Players to unban.", player_schema())}), ["players"]),
             wrap(
                 "msmp.bans.remove",
                 lambda args: action(
                     "msmp.bans.remove",
                     args,
                     {"backend": "msmp", "players": args.get("players")},
-                    lambda: msmp.call("minecraft:bans/remove", [list_player_objects(args)]),
+                    lambda: msmp_call(args, "minecraft:bans/remove", [list_player_objects(args)]),
                 ),
             ),
         ),
@@ -1341,12 +1527,12 @@ def make_tools(config: AppConfig) -> list[Tool]:
             "msmp.bans.set",
             "Replace the player ban list through MSMP. Requires confirm=true or dry_run=true.",
             confirm_schema(
-                {
+                msmp_props({
                     "players": array("Full player ban list.", player_schema()),
                     "reason": string("Optional ban reason applied to every entry."),
                     "source": string("Optional ban source applied to every entry."),
                     "expires": string("Optional expiration applied to every entry."),
-                },
+                }),
                 ["players"],
             ),
             wrap(
@@ -1355,40 +1541,40 @@ def make_tools(config: AppConfig) -> list[Tool]:
                     "msmp.bans.set",
                     args,
                     {"backend": "msmp", "players": args.get("players")},
-                    lambda: msmp.call("minecraft:bans/set", [ban_objects(args)]),
+                    lambda: msmp_call(args, "minecraft:bans/set", [ban_objects(args)]),
                 ),
             ),
         ),
         Tool(
             "msmp.bans.clear",
             "Clear the player ban list through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({}),
+            confirm_schema(msmp_props()),
             wrap(
                 "msmp.bans.clear",
                 lambda args: action(
                     "msmp.bans.clear",
                     args,
                     {"backend": "msmp"},
-                    lambda: msmp.call("minecraft:bans/clear"),
+                    lambda: msmp_call(args, "minecraft:bans/clear"),
                 ),
             ),
         ),
         Tool(
             "msmp.ip_bans.get",
             "Get the IP ban list through MSMP.",
-            schema({}),
-            wrap("msmp.ip_bans.get", lambda args: msmp.call("minecraft:ip_bans")),
+            schema(msmp_props()),
+            wrap("msmp.ip_bans.get", lambda args: msmp_call(args, "minecraft:ip_bans")),
         ),
         Tool(
             "msmp.ip_bans.add",
             "Add IP bans through MSMP. Requires confirm=true or dry_run=true.",
             confirm_schema(
-                {
+                msmp_props({
                     "ips": array("IP addresses to ban.", {"type": "string"}),
                     "reason": string("Optional ban reason."),
                     "source": string("Optional ban source."),
                     "expires": string("Optional expiration timestamp/string accepted by the server."),
-                },
+                }),
                 ["ips"],
             ),
             wrap(
@@ -1397,21 +1583,21 @@ def make_tools(config: AppConfig) -> list[Tool]:
                     "msmp.ip_bans.add",
                     args,
                     {"backend": "msmp", "ips": args.get("ips"), "reason": args.get("reason")},
-                    lambda: msmp.call("minecraft:ip_bans/add", [ip_ban_objects(args)]),
+                    lambda: msmp_call(args, "minecraft:ip_bans/add", [ip_ban_objects(args)]),
                 ),
             ),
         ),
         Tool(
             "msmp.ip_bans.remove",
             "Remove IP bans through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({"ips": array("IP addresses to unban.", {"type": "string"})}, ["ips"]),
+            confirm_schema(msmp_props({"ips": array("IP addresses to unban.", {"type": "string"})}), ["ips"]),
             wrap(
                 "msmp.ip_bans.remove",
                 lambda args: action(
                     "msmp.ip_bans.remove",
                     args,
                     {"backend": "msmp", "ips": args.get("ips")},
-                    lambda: msmp.call("minecraft:ip_bans/remove", [require_list(args, "ips")]),
+                    lambda: msmp_call(args, "minecraft:ip_bans/remove", [require_list(args, "ips")]),
                 ),
             ),
         ),
@@ -1419,12 +1605,12 @@ def make_tools(config: AppConfig) -> list[Tool]:
             "msmp.ip_bans.set",
             "Replace the IP ban list through MSMP. Requires confirm=true or dry_run=true.",
             confirm_schema(
-                {
+                msmp_props({
                     "ips": array("Full IP ban list.", {"type": "string"}),
                     "reason": string("Optional ban reason applied to every entry."),
                     "source": string("Optional ban source applied to every entry."),
                     "expires": string("Optional expiration applied to every entry."),
-                },
+                }),
                 ["ips"],
             ),
             wrap(
@@ -1433,101 +1619,101 @@ def make_tools(config: AppConfig) -> list[Tool]:
                     "msmp.ip_bans.set",
                     args,
                     {"backend": "msmp", "ips": args.get("ips")},
-                    lambda: msmp.call("minecraft:ip_bans/set", [ip_ban_objects(args)]),
+                    lambda: msmp_call(args, "minecraft:ip_bans/set", [ip_ban_objects(args)]),
                 ),
             ),
         ),
         Tool(
             "msmp.ip_bans.clear",
             "Clear the IP ban list through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({}),
+            confirm_schema(msmp_props()),
             wrap(
                 "msmp.ip_bans.clear",
                 lambda args: action(
                     "msmp.ip_bans.clear",
                     args,
                     {"backend": "msmp"},
-                    lambda: msmp.call("minecraft:ip_bans/clear"),
+                    lambda: msmp_call(args, "minecraft:ip_bans/clear"),
                 ),
             ),
         ),
         Tool(
             "msmp.allowlist.get",
             "Get the allowlist through MSMP.",
-            schema({}),
-            wrap("msmp.allowlist.get", lambda args: msmp.call("minecraft:allowlist")),
+            schema(msmp_props()),
+            wrap("msmp.allowlist.get", lambda args: msmp_call(args, "minecraft:allowlist")),
         ),
         Tool(
             "msmp.allowlist.add",
             "Add players to the allowlist through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({"players": array("Players to add.", player_schema())}, ["players"]),
+            confirm_schema(msmp_props({"players": array("Players to add.", player_schema())}), ["players"]),
             wrap(
                 "msmp.allowlist.add",
                 lambda args: action(
                     "msmp.allowlist.add",
                     args,
                     {"backend": "msmp", "players": args.get("players")},
-                    lambda: msmp.call("minecraft:allowlist/add", [list_player_objects(args)]),
+                    lambda: msmp_call(args, "minecraft:allowlist/add", [list_player_objects(args)]),
                 ),
             ),
         ),
         Tool(
             "msmp.allowlist.remove",
             "Remove players from the allowlist through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({"players": array("Players to remove.", player_schema())}, ["players"]),
+            confirm_schema(msmp_props({"players": array("Players to remove.", player_schema())}), ["players"]),
             wrap(
                 "msmp.allowlist.remove",
                 lambda args: action(
                     "msmp.allowlist.remove",
                     args,
                     {"backend": "msmp", "players": args.get("players")},
-                    lambda: msmp.call("minecraft:allowlist/remove", [list_player_objects(args)]),
+                    lambda: msmp_call(args, "minecraft:allowlist/remove", [list_player_objects(args)]),
                 ),
             ),
         ),
         Tool(
             "msmp.allowlist.set",
             "Replace the allowlist through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({"players": array("Full allowlist players.", player_schema())}, ["players"]),
+            confirm_schema(msmp_props({"players": array("Full allowlist players.", player_schema())}), ["players"]),
             wrap(
                 "msmp.allowlist.set",
                 lambda args: action(
                     "msmp.allowlist.set",
                     args,
                     {"backend": "msmp", "players": args.get("players")},
-                    lambda: msmp.call("minecraft:allowlist/set", [list_player_objects(args)]),
+                    lambda: msmp_call(args, "minecraft:allowlist/set", [list_player_objects(args)]),
                 ),
             ),
         ),
         Tool(
             "msmp.allowlist.clear",
             "Clear the allowlist through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({}),
+            confirm_schema(msmp_props()),
             wrap(
                 "msmp.allowlist.clear",
                 lambda args: action(
                     "msmp.allowlist.clear",
                     args,
                     {"backend": "msmp"},
-                    lambda: msmp.call("minecraft:allowlist/clear"),
+                    lambda: msmp_call(args, "minecraft:allowlist/clear"),
                 ),
             ),
         ),
         Tool(
             "msmp.operators.get",
             "Get operators through MSMP.",
-            schema({}),
-            wrap("msmp.operators.get", lambda args: msmp.call("minecraft:operators")),
+            schema(msmp_props()),
+            wrap("msmp.operators.get", lambda args: msmp_call(args, "minecraft:operators")),
         ),
         Tool(
             "msmp.operators.add",
             "Add operators through MSMP. Requires confirm=true or dry_run=true.",
             confirm_schema(
-                {
+                msmp_props({
                     "players": array("Players to op.", player_schema()),
                     "permission_level": integer("Operator permission level.", default=4),
                     "bypasses_player_limit": boolean("Whether ops bypass the player limit.", default=False),
-                },
+                }),
                 ["players"],
             ),
             wrap(
@@ -1536,21 +1722,21 @@ def make_tools(config: AppConfig) -> list[Tool]:
                     "msmp.operators.add",
                     args,
                     {"backend": "msmp", "players": args.get("players")},
-                    lambda: msmp.call("minecraft:operators/add", [operator_objects(args)]),
+                    lambda: msmp_call(args, "minecraft:operators/add", [operator_objects(args)]),
                 ),
             ),
         ),
         Tool(
             "msmp.operators.remove",
             "Remove operators through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({"players": array("Players to deop.", player_schema())}, ["players"]),
+            confirm_schema(msmp_props({"players": array("Players to deop.", player_schema())}), ["players"]),
             wrap(
                 "msmp.operators.remove",
                 lambda args: action(
                     "msmp.operators.remove",
                     args,
                     {"backend": "msmp", "players": args.get("players")},
-                    lambda: msmp.call("minecraft:operators/remove", [list_player_objects(args)]),
+                    lambda: msmp_call(args, "minecraft:operators/remove", [list_player_objects(args)]),
                 ),
             ),
         ),
@@ -1558,11 +1744,11 @@ def make_tools(config: AppConfig) -> list[Tool]:
             "msmp.operators.set",
             "Replace the operator list through MSMP. Requires confirm=true or dry_run=true.",
             confirm_schema(
-                {
+                msmp_props({
                     "players": array("Full operator list players.", player_schema()),
                     "permission_level": integer("Operator permission level.", default=4),
                     "bypasses_player_limit": boolean("Whether ops bypass the player limit.", default=False),
-                },
+                }),
                 ["players"],
             ),
             wrap(
@@ -1571,41 +1757,42 @@ def make_tools(config: AppConfig) -> list[Tool]:
                     "msmp.operators.set",
                     args,
                     {"backend": "msmp", "players": args.get("players")},
-                    lambda: msmp.call("minecraft:operators/set", [operator_objects(args)]),
+                    lambda: msmp_call(args, "minecraft:operators/set", [operator_objects(args)]),
                 ),
             ),
         ),
         Tool(
             "msmp.operators.clear",
             "Clear operators through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({}),
+            confirm_schema(msmp_props()),
             wrap(
                 "msmp.operators.clear",
                 lambda args: action(
                     "msmp.operators.clear",
                     args,
                     {"backend": "msmp"},
-                    lambda: msmp.call("minecraft:operators/clear"),
+                    lambda: msmp_call(args, "minecraft:operators/clear"),
                 ),
             ),
         ),
         Tool(
             "msmp.gamerules.get",
             "Get game rules through MSMP.",
-            schema({}),
-            wrap("msmp.gamerules.get", lambda args: msmp.call("minecraft:gamerules")),
+            schema(msmp_props()),
+            wrap("msmp.gamerules.get", lambda args: msmp_call(args, "minecraft:gamerules")),
         ),
         Tool(
             "msmp.gamerules.update",
             "Update a game rule through MSMP. Requires confirm=true or dry_run=true.",
-            confirm_schema({"rule": string("Game rule key."), "value": {"description": "New value.", "type": ["boolean", "number", "string"]}}, ["rule", "value"]),
+            confirm_schema(msmp_props({"rule": string("Game rule key."), "value": {"description": "New value.", "type": ["boolean", "number", "string"]}}), ["rule", "value"]),
             wrap(
                 "msmp.gamerules.update",
                 lambda args: action(
                     "msmp.gamerules.update",
                     args,
                     {"backend": "msmp", "rule": args.get("rule"), "value": args.get("value")},
-                    lambda: msmp.call(
+                    lambda: msmp_call(
+                        args,
                         "minecraft:gamerules/update",
                         [{"key": require_str(args, "rule"), "value": game_rule_value(args.get("value"))}],
                     ),
@@ -1615,23 +1802,23 @@ def make_tools(config: AppConfig) -> list[Tool]:
         Tool(
             "msmp.server_settings.get",
             "Get one server setting through MSMP, for example difficulty or motd.",
-            schema({"setting": string("Setting name after minecraft:serversettings/, for example difficulty.")}, ["setting"]),
-            wrap("msmp.server_settings.get", lambda args: msmp.call(f"minecraft:serversettings/{require_str(args, 'setting')}")),
+            schema(msmp_props({"setting": string("Setting name after minecraft:serversettings/, for example difficulty.")}), ["setting"]),
+            wrap("msmp.server_settings.get", lambda args: msmp_call(args, f"minecraft:serversettings/{require_str(args, 'setting')}")),
         ),
         Tool(
             "msmp.server_settings.list",
             "Discover readable and writable MSMP server settings from rpc.discover.",
-            schema({}),
+            schema(msmp_props()),
             wrap("msmp.server_settings.list", msmp_server_settings_list),
         ),
         Tool(
             "msmp.server_settings.set",
             "Set one server setting through MSMP. Requires confirm=true or dry_run=true.",
             confirm_schema(
-                {
+                msmp_props({
                     "setting": string("Setting name after minecraft:serversettings/, for example difficulty."),
                     "value": {"description": "New value.", "type": ["boolean", "number", "string"]},
-                },
+                }),
                 ["setting", "value"],
             ),
             wrap("msmp.server_settings.set", set_server_setting),
@@ -1670,8 +1857,10 @@ def _tool_annotations(name: str) -> dict:
             "rcon.list_players",
             "rcon.time_query",
             "resources.list",
+            "rcon.config.get",
             "modpack.inspect_jar",
             "modpack.diff_snapshots",
+            "msmp.config.get",
             "modpack.classify_startup_result",
             "modpack.list_test_runs",
             "modpack.get_test_run",
@@ -1801,6 +1990,16 @@ def shallow_diff(before: dict, after: dict) -> dict:
         if old != new:
             diff[key] = {"before": old, "after": new}
     return diff
+
+
+def redact_sensitive_diff(diff: dict) -> dict:
+    redacted: dict[str, Any] = {}
+    for key, value in diff.items():
+        if any(part in str(key).lower() for part in ("apikey", "api_key", "password", "secret", "token")):
+            redacted[key] = {"before": "<redacted>", "after": "<redacted>"}
+        else:
+            redacted[key] = value
+    return redacted
 
 
 def _collect_msmp_methods(value: Any) -> set[str]:

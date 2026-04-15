@@ -105,6 +105,11 @@ msmp = MsmpClient(config)
 modpack = ModpackManager(config, mcsm)
 ```
 
+RCON 和 MSMP 不再从 MCP 客户端环境变量读取固定目标。工具层通过 `managed_backends.py` 从 MCSManager 读取目标实例配置：
+
+- RCON：`get_instance()` 的 `config.enableRcon`、`rconIp`、`rconPort`、`rconPassword`。
+- MSMP：`read_file("server.properties")` 的 `management-server-*` properties。
+
 每个工具用 `Tool(...)` 注册。高风险操作通过 `action(...)` 调用 `guard_high_risk(...)`。所有 handler 由 `wrap(...)` 包裹，用于记录审计日志和统一错误流。
 
 `modpack.py`
@@ -120,6 +125,15 @@ modpack = ModpackManager(config, mcsm)
 - `ModpackManager.classify_startup_result()`：从 inline 文本或 MCSManager 远程日志读取启动/崩溃文本，按签名分类常见兼容性问题。
 - `ModpackManager.record_test_run()`、`list_test_runs()`、`get_test_run()`：在 `MINECRAFT_OPS_MODPACK_WORKSPACE/runs` 下保存和读取测试运行记录。
 - `remote_paths` / `current_paths`：用于 MCSManager 目录 listing 不可靠时显式指定需要读取或比较的实例内 jar。
+
+`managed_backends.py`
+
+MCSManager 托管后端配置层。它把 MCSManager 实例配置和文件内容转换成 RCON/MSMP 运行时连接对象，同时只向工具返回脱敏视图：
+
+- `rcon_runtime_config()`：从实例配置生成 `RconConnection`。
+- `msmp_runtime_config()`：从 `server.properties` 生成 `MsmpConnection`。
+- `update_properties_text()`：保留 `server.properties` 注释和无关行，只替换/追加目标 key。
+- `derive_connection_host()`：当服务端配置为 `0.0.0.0`、`127.0.0.1` 或空值时，用 MCSManager 面板 host 作为连接 host；复杂网络可由工具参数 `connection_host` 覆盖。
 
 `policy.py`
 
@@ -208,6 +222,7 @@ modpack = ModpackManager(config, mcsm)
 - 当前是每次命令新建连接。
 - 多包响应通过额外 marker 请求减少等待 timeout，但复杂大输出仍可能需要继续压测。
 - 不做 TLS，因为 RCON 协议本身没有 TLS。
+- 连接 host/port/password 由工具层从 MCSManager 实例配置传入，adapter 本身不读取客户端环境变量。
 
 工具层提供了低风险固定命令封装：
 
@@ -230,11 +245,12 @@ modpack = ModpackManager(config, mcsm)
 
 关键流程：
 
-1. 解析 `MSMP_URL`。
-2. 根据 `MSMP_SECRET` 设置 `Authorization: Bearer ...`。
-3. 对 `wss://` 且 `MSMP_TLS_VERIFY=false` 的场景传入 TLS 校验选项。
-4. 通过 `websocket.create_connection(...)` 建立连接。
-5. 发送 JSON-RPC payload，并读取匹配 `id` 的响应。
+1. 工具层从 MCSManager 读取 `server.properties` 并构造 `MsmpConnection`。
+2. adapter 解析 `MsmpConnection.url`。
+3. 根据 `MsmpConnection.secret` 设置 `Authorization: Bearer ...`。
+4. 对 `wss://` 且 `tls_verify=false` 的场景传入 TLS 校验选项。
+5. 通过 `websocket.create_connection(...)` 建立连接。
+6. 发送 JSON-RPC payload，并读取匹配 `id` 的响应。
 
 ## 5. 工具命名与分层
 
@@ -247,7 +263,7 @@ modpack = ModpackManager(config, mcsm)
 - `rcon.*`：RCON 工具。
 - `msmp.*`：MSMP 结构化工具。
 
-当前工具数为 80。新增工具应优先复用已有命名分层，只有直接映射后端协议的逃生口才保留 raw call/command。
+当前工具数为 84。新增工具应优先复用已有命名分层，只有直接映射后端协议的逃生口才保留 raw call/command。
 
 工具命名使用 MCP 友好的点分形式，例如 `msmp.players.list`，避免直接暴露 `minecraft:players` 这种后端协议名。
 
@@ -309,9 +325,10 @@ MCP 协议级集成探针：
 ```bash
 python3 -B scripts/mcp_integration_probe.py > /tmp/minecraft-ops-mcp-probe-report.json
 python3 -B scripts/msmp_temp_instance_probe.py > /tmp/minecraft-ops-mcp-msmp-probe-report.json
+python3 -B scripts/multi_server_backend_probe.py > /tmp/minecraft-ops-mcp-multi-probe-report.json
 ```
 
-这两个脚本都通过 stdio JSON-RPC 调用 MCP server。第一个覆盖基础协议、MCSManager、RCON 和 MSMP dry-run；第二个会创建并删除临时 Minecraft 1.21.9+ 实例，真实回归 MSMP 读写能力。运行前需要在环境变量中配置 MCSManager，第二个脚本还会从 Mojang version manifest 获取 server jar，或使用 `MINECRAFT_SERVER_JAR_URL` 指定 jar。
+这些脚本都通过 stdio JSON-RPC 调用 MCP server。第一个覆盖基础协议、MCSManager、RCON 和 MSMP dry-run；第二个会创建并删除临时 Minecraft 1.21.9+ 实例，真实回归 MSMP 读写能力；第三个会创建两个临时实例，验证同一个 MCP 进程按不同 `daemonId/uuid` 动态读取并连接多实例 RCON/MSMP。运行前需要在环境变量中配置 MCSManager，后两个脚本会从 Mojang version manifest 获取 server jar，或使用 `MINECRAFT_SERVER_JAR_URL`/`MINECRAFT_SERVER_JAR_PATH` 指定 jar。
 
 MCP stdio 测试思路：
 

@@ -45,27 +45,14 @@ class McsmConfig:
 
 @dataclass(frozen=True)
 class RconConfig:
-    host: str = ""
-    port: int = 25575
-    password: str = ""
     timeout_seconds: float = 5.0
     encoding: str = "utf-8"
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.host and self.password)
 
 
 @dataclass(frozen=True)
 class MsmpConfig:
-    url: str = ""
-    secret: str = ""
     timeout_seconds: float = 8.0
     tls_verify: bool = True
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.url)
 
 
 @dataclass(frozen=True)
@@ -94,17 +81,12 @@ class AppConfig:
                 timeout_seconds=_env_float("MCSM_TIMEOUT_SECONDS", 10.0),
             ),
             rcon=RconConfig(
-                host=os.getenv("RCON_HOST", ""),
-                port=_env_int("RCON_PORT", 25575),
-                password=os.getenv("RCON_PASSWORD", ""),
-                timeout_seconds=_env_float("RCON_TIMEOUT_SECONDS", 5.0),
-                encoding=os.getenv("RCON_ENCODING", "utf-8"),
+                timeout_seconds=_env_float("MINECRAFT_OPS_RCON_TIMEOUT_SECONDS", 5.0),
+                encoding=os.getenv("MINECRAFT_OPS_RCON_ENCODING", "utf-8"),
             ),
             msmp=MsmpConfig(
-                url=os.getenv("MSMP_URL", ""),
-                secret=os.getenv("MSMP_SECRET", ""),
-                timeout_seconds=_env_float("MSMP_TIMEOUT_SECONDS", 8.0),
-                tls_verify=_env_bool("MSMP_TLS_VERIFY", True),
+                timeout_seconds=_env_float("MINECRAFT_OPS_MSMP_TIMEOUT_SECONDS", 8.0),
+                tls_verify=_env_bool("MINECRAFT_OPS_MSMP_TLS_VERIFY", True),
             ),
             audit_log=os.getenv("MINECRAFT_OPS_AUDIT_LOG", "/tmp/minecraft-ops-mcp-audit.jsonl"),
             allow_raw_commands=_env_bool("MINECRAFT_OPS_ALLOW_RAW_COMMANDS", False),
@@ -127,15 +109,13 @@ class AppConfig:
                 "default_instance_uuid_set": bool(self.mcsm.default_instance_uuid),
             },
             "rcon": {
-                "enabled": self.rcon.enabled,
-                "host": self.rcon.host,
-                "port": self.rcon.port,
-                "password_set": bool(self.rcon.password),
+                "managed_by_mcsm": True,
+                "timeout_seconds": self.rcon.timeout_seconds,
+                "encoding": self.rcon.encoding,
             },
             "msmp": {
-                "enabled": self.msmp.enabled,
-                "url": self.msmp.url,
-                "secret_set": bool(self.msmp.secret),
+                "managed_by_mcsm": True,
+                "timeout_seconds": self.msmp.timeout_seconds,
                 "tls_verify": self.msmp.tls_verify,
             },
             "audit_log": self.audit_log,

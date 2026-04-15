@@ -33,6 +33,8 @@ class ConfigAndMcsmSafetyTests(unittest.TestCase):
                 "MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS": "/tmp/a,/tmp/b",
                 "MINECRAFT_OPS_FILE_OPERATION_WHITELIST": "config,mods",
                 "MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS": "example.com,cdn.example.org",
+                "MINECRAFT_OPS_RCON_TIMEOUT_SECONDS": "7",
+                "MINECRAFT_OPS_MSMP_TIMEOUT_SECONDS": "9",
             },
             clear=True,
         ):
@@ -41,6 +43,8 @@ class ConfigAndMcsmSafetyTests(unittest.TestCase):
         self.assertEqual(config.upload_allowed_dirs, ("/tmp/a", "/tmp/b"))
         self.assertEqual(config.file_operation_whitelist, ("config", "mods"))
         self.assertEqual(config.upload_url_allowed_domains, ("example.com", "cdn.example.org"))
+        self.assertEqual(config.rcon.timeout_seconds, 7)
+        self.assertEqual(config.msmp.timeout_seconds, 9)
 
     def test_local_path_allowlist_accepts_children_and_rejects_outside(self) -> None:
         with tempfile.TemporaryDirectory() as allowed, tempfile.TemporaryDirectory() as denied:

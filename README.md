@@ -79,11 +79,10 @@ python3 -m compileall -q src scripts
         "MCSM_API_KEY": "replace-me",
         "MCSM_DEFAULT_DAEMON_ID": "replace-me",
         "MCSM_DEFAULT_INSTANCE_UUID": "replace-me",
-        "RCON_HOST": "127.0.0.1",
-        "RCON_PORT": "25575",
-        "RCON_PASSWORD": "replace-me",
-        "MSMP_URL": "ws://127.0.0.1:25585",
-        "MSMP_SECRET": "replace-me",
+        "MINECRAFT_OPS_RCON_TIMEOUT_SECONDS": "5",
+        "MINECRAFT_OPS_RCON_ENCODING": "utf-8",
+        "MINECRAFT_OPS_MSMP_TIMEOUT_SECONDS": "8",
+        "MINECRAFT_OPS_MSMP_TLS_VERIFY": "true",
         "MINECRAFT_OPS_RAW_COMMAND_ALLOWLIST": "list,time,help",
         "MINECRAFT_OPS_RAW_COMMAND_DENYLIST": "stop,op,deop,ban,ban-ip",
         "MINECRAFT_OPS_MAX_BYTES": "268435456",
@@ -98,6 +97,13 @@ python3 -m compileall -q src scripts
 ```
 
 也可以参考 `.env.example`，把变量放进你的 MCP 客户端配置里。这个服务本身不会自动读取 `.env` 文件，避免让运行时配置来源变得隐式。
+
+RCON 和 MSMP 不在 MCP 客户端配置中写固定连接信息。它们按实例动态读取：
+
+- RCON：从 MCSManager 实例配置读取 `enableRcon`、`rconIp`、`rconPort`、`rconPassword`；需要修改时用 `rcon.config.set`。
+- MSMP：通过 MCSManager 文件 API 读取实例内 `server.properties` 的 `management-server-*` 配置；需要修改时用 `msmp.config.set`。
+
+这使同一个 MCP 服务可以管理多个 Minecraft 实例，而不需要为每台服务器配置一套 RCON/MSMP 环境变量。
 
 ## 主要工具
 
@@ -156,6 +162,8 @@ MCSManager：
 
 RCON：
 
+- `rcon.config.get`
+- `rcon.config.set`
 - `rcon.command`
 - `rcon.list_players`
 - `rcon.time_query`
@@ -163,6 +171,8 @@ RCON：
 
 MSMP：
 
+- `msmp.config.get`
+- `msmp.config.set`
 - `msmp.discover`
 - `msmp.call`
 - `msmp.players.list`

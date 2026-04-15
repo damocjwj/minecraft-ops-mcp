@@ -5,7 +5,6 @@ import os
 import secrets
 import string
 import time
-import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -22,14 +21,13 @@ def main() -> int:
     nickname = os.getenv("MSMP_PROBE_NICKNAME", f"codex-msmp-probe-{now}")
     game_port = int(os.getenv("MSMP_PROBE_GAME_PORT", "25666"))
     msmp_port = int(os.getenv("MSMP_PROBE_PORT", "25686"))
-    msmp_host = msmp_probe_host()
     cwd = os.getenv("MSMP_PROBE_CWD", f"/opt/mcsmanager/daemon/data/InstanceData/{nickname}")
 
     probe = McpProbe(env)
     probe.start()
     instance_uuid = ""
     try:
-        instance_uuid = run_probe(probe, nickname, cwd, game_port, msmp_port, msmp_host, secret, jar_url)
+        instance_uuid = run_probe(probe, nickname, cwd, game_port, msmp_port, secret, jar_url)
     finally:
         if instance_uuid:
             cleanup_instance(probe, instance_uuid)
@@ -38,7 +36,6 @@ def main() -> int:
     report = {
         "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "nickname": nickname,
-        "msmpHost": msmp_host,
         "msmpPort": msmp_port,
         "total": len(probe.results),
         "passed": sum(1 for result in probe.results if result.ok),
@@ -74,20 +71,12 @@ def random_secret() -> str:
     return "".join(secrets.choice(alphabet) for _ in range(40))
 
 
-def msmp_probe_host() -> str:
-    if os.getenv("MSMP_PROBE_HOST"):
-        return os.environ["MSMP_PROBE_HOST"]
-    parsed = urllib.parse.urlparse(os.environ["MCSM_BASE_URL"])
-    return parsed.hostname or "127.0.0.1"
-
-
 def run_probe(
     probe: McpProbe,
     nickname: str,
     cwd: str,
     game_port: int,
     msmp_port: int,
-    msmp_host: str,
     secret: str,
     jar_url: str,
 ) -> str:
@@ -120,18 +109,12 @@ def run_probe(
     probe.expect_ok("file.read.server_properties", lambda: probe.tool("file.read", {**ids, "target": "server.properties"}))
     probe.expect_ok("instance.update_config_patch.actual", lambda: probe.tool("instance.update_config_patch", {**ids, "patch": {"tag": ["codex-probe"]}, "confirm": True}))
     probe.expect_ok("server.start.msmp_temp", lambda: probe.tool("server.start", {**ids, "confirm": True}))
-    wait_for_msmp(probe, msmp_port, msmp_host, secret)
+    wait_for_msmp(probe, ids, msmp_port)
     probe.expect_ok("server.restart.msmp_temp", lambda: probe.tool("server.restart", {**ids, "confirm": True}))
     time.sleep(5)
-    wait_for_msmp(probe, msmp_port, msmp_host, secret)
+    wait_for_msmp(probe, ids, msmp_port)
 
-    msmp_env = {
-        **probe.env,
-        "MSMP_URL": f"ws://{msmp_host}:{msmp_port}",
-        "MSMP_SECRET": secret,
-        "MSMP_TLS_VERIFY": "false",
-    }
-    msmp_probe = McpProbe(msmp_env)
+    msmp_probe = McpProbe(probe.env)
     msmp_probe.start()
     try:
         msmp_probe.expect_ok(
@@ -146,7 +129,7 @@ def run_probe(
             ),
         )
         msmp_probe.notify("notifications/initialized")
-        run_msmp_calls(msmp_probe)
+        run_msmp_calls(msmp_probe, ids)
     finally:
         msmp_probe.close()
     probe.results.extend(msmp_probe.results)
@@ -154,13 +137,13 @@ def run_probe(
     probe.expect_ok("server.get_logs.msmp_temp", lambda: probe.tool("server.get_logs", {**ids, "size": 512}))
     wait_for_instance_stopped(probe, instance_uuid)
     probe.expect_ok("server.start.after_msmp_stop", lambda: probe.tool("server.start", {**ids, "confirm": True}))
-    wait_for_msmp(probe, msmp_port, msmp_host, secret)
+    wait_for_msmp(probe, ids, msmp_port)
     probe.expect_ok("server.stop.msmp_temp", lambda: probe.tool("server.stop", {**ids, "confirm": True}))
     wait_for_instance_stopped(probe, instance_uuid)
     return instance_uuid
 
 
-def run_msmp_calls(probe: McpProbe) -> None:
+def run_msmp_calls(probe: McpProbe, ids: dict[str, str]) -> None:
     for name, args in [
         ("msmp.discover", {}),
         ("msmp.call.status", {"method": "minecraft:server/status", "read_only": True}),
@@ -177,7 +160,7 @@ def run_msmp_calls(probe: McpProbe) -> None:
         tool_name = name.split(".status")[0] if name == "msmp.call.status" else name
         if name == "msmp.call.status":
             tool_name = "msmp.call"
-        probe.expect_ok(name, lambda tool_name=tool_name, args=args: probe.tool(tool_name, args))
+        probe.expect_ok(name, lambda tool_name=tool_name, args=args: probe.tool(tool_name, {**ids, **args}))
 
     for label, tool_name, args in [
         ("server.broadcast.msmp", "server.broadcast", {"backend": "msmp", "message": "minecraft-ops-mcp msmp probe"}),
@@ -204,9 +187,9 @@ def run_msmp_calls(probe: McpProbe) -> None:
         ("msmp.ip_bans.set", "msmp.ip_bans.set", {"ips": [], "confirm": True}),
         ("msmp.ip_bans.clear", "msmp.ip_bans.clear", {"confirm": True}),
     ]:
-        probe.expect_ok(label, lambda tool_name=tool_name, args=args: probe.tool(tool_name, args))
+        probe.expect_ok(label, lambda tool_name=tool_name, args=args: probe.tool(tool_name, {**ids, **args}))
 
-    probe.expect_ok("msmp.server.stop", lambda: probe.tool("msmp.server.stop", {"confirm": True}))
+    probe.expect_ok("msmp.server.stop", lambda: probe.tool("msmp.server.stop", {**ids, "confirm": True}))
 
 
 def cleanup_instance(probe: McpProbe, instance_uuid: str) -> None:
@@ -237,12 +220,11 @@ def wait_for_instance_uuid(probe: McpProbe, nickname: str) -> str:
     return ""
 
 
-def wait_for_msmp(probe: McpProbe, port: int, host: str, secret: str) -> None:
-    env = {**probe.env, "MSMP_URL": f"ws://{host}:{port}", "MSMP_SECRET": secret, "MSMP_TLS_VERIFY": "false"}
+def wait_for_msmp(probe: McpProbe, ids: dict[str, str], port: int) -> None:
     deadline = time.monotonic() + 180
     last_error = ""
     while time.monotonic() < deadline:
-        temp = McpProbe(env)
+        temp = McpProbe(probe.env)
         temp.start()
         try:
             temp.request(
@@ -254,7 +236,7 @@ def wait_for_msmp(probe: McpProbe, port: int, host: str, secret: str) -> None:
                 },
             )
             temp.notify("notifications/initialized")
-            temp.tool("msmp.server.status")
+            temp.tool("msmp.server.status", ids)
             probe.results.append(ProbeResult("wait.msmp.ready", True, f"port={port}"))
             return
         except Exception as exc:  # noqa: BLE001

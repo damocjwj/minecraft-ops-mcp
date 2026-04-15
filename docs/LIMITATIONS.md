@@ -159,7 +159,7 @@
 真实测试中观察到：
 
 - Minecraft 1.21.9 的 `management-server-secret` 必须是 40 位字母数字，带连字符或长度不对会导致服务端启动失败。
-- MSMP 如果关闭 TLS，`MSMP_URL` 使用 `ws://...`；如果启用 TLS，使用 `wss://...`。
+- MSMP 如果关闭 TLS，运行时连接使用 `ws://...`；如果启用 TLS，使用 `wss://...`。URL 不再由 MCP 客户端配置，而是由 MCSManager 中的 `server.properties` 动态推导。
 - `server.properties` 中 MSMP 端口和游戏端口要避开已有实例。
 - MCSManager 中切换 RCON 配置时，运行中的实例可能不允许直接更新相关字段，先停服再更新更稳。
 - 对不存在的新文件，`file.touch` 后再 `file.write` 更稳。

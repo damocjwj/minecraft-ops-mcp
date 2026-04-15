@@ -2,6 +2,14 @@
 
 All notable changes to `minecraft-ops-mcp` are documented here.
 
+## 0.8.0 - 2026-04-15
+
+- Make MCSManager the authoritative backend configuration source for multi-server operations.
+- Remove fixed client-side RCON host, port, and password configuration; `rcon.*` tools now read connection settings from the target instance config through MCSManager.
+- Remove fixed client-side MSMP URL and secret configuration; `msmp.*` tools now read `management-server-*` settings from the target instance `server.properties` through MCSManager.
+- Add `rcon.config.get`, `rcon.config.set`, `msmp.config.get`, and `msmp.config.set` to inspect or update per-instance protocol settings through MCSManager.
+- Update real-backend probes and documentation for dynamic per-instance RCON/MSMP routing.
+
 ## 0.7.0 - 2026-04-15
 
 - Add modpack test-run recording tools:

@@ -168,9 +168,6 @@ def require_env(names: list[str]) -> dict[str, str]:
 
 def main() -> int:
     env = require_env(["MCSM_BASE_URL", "MCSM_API_KEY", "MCSM_DEFAULT_DAEMON_ID", "MCSM_DEFAULT_INSTANCE_UUID"])
-    for name in ("RCON_HOST", "RCON_PORT", "RCON_PASSWORD", "MSMP_URL", "MSMP_SECRET", "MSMP_TLS_VERIFY"):
-        if os.getenv(name):
-            env[name] = os.environ[name]
     env["MINECRAFT_OPS_AUDIT_LOG"] = os.getenv("MINECRAFT_OPS_AUDIT_LOG", "/tmp/minecraft-ops-mcp-probe-audit.jsonl")
     probe = McpProbe(env)
     probe.start()
@@ -204,7 +201,7 @@ def run_probe(probe: McpProbe) -> None:
     probe.notify("notifications/initialized")
     tools = probe.expect_ok("tools/list", lambda: probe.request("tools/list")["result"]["tools"])
     names = {item["name"] for item in tools or []}
-    probe.results.append(ProbeResult("tools/list.count", len(names) >= 80, f"tool_count={len(names)}"))
+    probe.results.append(ProbeResult("tools/list.count", len(names) >= 84, f"tool_count={len(names)}"))
     probe.expect_ok("resources/list", lambda: probe.request("resources/list")["result"]["resources"])
     for uri in ("minecraft-ops://config", "minecraft-ops://safety", "minecraft-ops://tools"):
         probe.expect_ok(f"resources/read:{uri}", lambda uri=uri: probe.request("resources/read", {"uri": uri})["result"])
@@ -217,7 +214,7 @@ def run_probe(probe: McpProbe) -> None:
     probe.expect_ok("server.list_daemons", lambda: probe.tool("server.list_daemons"))
     probe.expect_ok("server.get_daemon_system", lambda: probe.tool("server.get_daemon_system"))
     probe.expect_ok("server.list_instances", lambda: probe.tool("server.list_instances", {"page": 1, "page_size": 20}))
-    probe.expect_ok("server.get_instance", lambda: probe.tool("server.get_instance"))
+    instance = probe.expect_ok("server.get_instance", lambda: probe.tool("server.get_instance"))
     probe.expect_ok("server.get_logs", lambda: probe.tool("server.get_logs", {"size": 256}))
     probe.expect_ok("server.send_command.dry_run", lambda: probe.tool("server.send_command", {"command": "list", "dry_run": True}))
     probe.expect_ok("server.save_world.mcsm", lambda: probe.tool("server.save_world", {"backend": "mcsm", "flush": True}))
@@ -308,13 +305,18 @@ def run_probe(probe: McpProbe) -> None:
         except FileNotFoundError:
             pass
 
+    probe.expect_ok("rcon.config.get", lambda: probe.tool("rcon.config.get"))
+    probe.expect_ok("rcon.config.set.dry_run", lambda: probe.tool("rcon.config.set", {"enabled": True, "dry_run": True}))
     probe.expect_ok("rcon.command.dry_run", lambda: probe.tool("rcon.command", {"command": "list", "dry_run": True}))
-    if os.getenv("RCON_HOST") and os.getenv("RCON_PASSWORD"):
+    instance_config = ((instance or {}).get("data") or {}).get("config") if isinstance(instance, dict) else {}
+    if isinstance(instance_config, dict) and instance_config.get("enableRcon"):
         probe.expect_ok("rcon.list_players", lambda: probe.tool("rcon.list_players"))
         probe.expect_ok("rcon.time_query", lambda: probe.tool("rcon.time_query", {"query": "daytime"}))
         probe.expect_ok("rcon.save_all", lambda: probe.tool("rcon.save_all", {"flush": False}))
         probe.expect_ok("rcon.command", lambda: probe.tool("rcon.command", {"command": "list", "confirm": True}))
 
+    probe.expect_ok("msmp.config.get", lambda: probe.tool("msmp.config.get"))
+    probe.expect_ok("msmp.config.set.dry_run", lambda: probe.tool("msmp.config.set", {"enabled": True, "dry_run": True}))
     probe.expect_ok("msmp.call.dry_run", lambda: probe.tool("msmp.call", {"method": "minecraft:server/status", "dry_run": True}))
     for name, args in [
         ("msmp.server.save", {"flush": True, "dry_run": True}),
@@ -346,7 +348,8 @@ def run_probe(probe: McpProbe) -> None:
         "Invalid value",
     )
 
-    if os.getenv("MSMP_URL"):
+    msmp_config = probe.expect_ok("msmp.config.get.after_dry_runs", lambda: probe.tool("msmp.config.get"))
+    if isinstance(msmp_config, dict) and msmp_config.get("enabled"):
         for name, args in [
             ("msmp.discover", {}),
             ("msmp.call", {"method": "minecraft:server/status", "read_only": True}),

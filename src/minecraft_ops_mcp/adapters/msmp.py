@@ -2,41 +2,50 @@ from __future__ import annotations
 
 import json
 import ssl
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 import websocket
 
-from ..config import AppConfig, MsmpConfig
+from ..config import AppConfig
 from ..errors import ConfigError, OpsError
+
+
+@dataclass(frozen=True)
+class MsmpConnection:
+    url: str
+    secret: str = ""
+    timeout_seconds: float = 8.0
+    tls_verify: bool = True
 
 
 class MsmpClient:
     def __init__(self, config: AppConfig) -> None:
         self.config = config.msmp
 
-    def _require_enabled(self) -> None:
-        if not self.config.enabled:
-            raise ConfigError("MSMP is not configured. Set MSMP_URL and MSMP_SECRET if the server requires it.")
+    def _connection(self, connection: MsmpConnection | None) -> MsmpConnection:
+        if connection is None:
+            raise ConfigError("MSMP connection is not configured for this call. Read it from MCSManager server.properties first.")
+        return connection
 
-    def call(self, method: str, params: Any | None = None) -> Any:
-        self._require_enabled()
-        return _WebSocketJsonRpc(self.config).call(method, params)
+    def call(self, method: str, params: Any | None = None, connection: MsmpConnection | None = None) -> Any:
+        return _WebSocketJsonRpc(self._connection(connection)).call(method, params)
 
-    def discover(self) -> Any:
-        return self.call("rpc.discover")
+    def discover(self, connection: MsmpConnection | None = None) -> Any:
+        return self.call("rpc.discover", connection=connection)
 
 
 class _WebSocketJsonRpc:
-    def __init__(self, config: MsmpConfig) -> None:
+    def __init__(self, config: MsmpConnection) -> None:
         self.config = config
 
     def call(self, method: str, params: Any | None = None) -> Any:
         parsed = urlparse(self.config.url)
         if parsed.scheme not in {"ws", "wss"}:
-            raise ConfigError("MSMP_URL must start with ws:// or wss://.")
+            raise ConfigError("MSMP connection URL must start with ws:// or wss://.")
         if not parsed.hostname:
-            raise ConfigError("MSMP_URL is missing a host.")
+            raise ConfigError("MSMP connection URL is missing a host.")
 
         headers: list[str] = []
         if self.config.secret:

@@ -4,12 +4,13 @@
 
 ## 结论
 
-- 工具目录：80 个工具全部被覆盖。
-- 基础 MCP 探针：85/85 通过。
+- 工具目录：84 个工具完成注册和目录校验。
+- 基础 MCP 探针：90/90 通过。
 - 临时 MSMP 实例探针：58/58 通过。
-- 单元测试：37/37 通过。
+- 多服务器 RCON/MSMP 探针：69/69 通过。
+- 单元测试：45/45 通过。
 - MCP 初始化协议版本：`2025-11-25`。
-- 打包验证：生成 `minecraft_ops_mcp-0.7.0-py3-none-any.whl`。
+- 打包验证：生成 `minecraft_ops_mcp-0.8.0-py3-none-any.whl`。
 - 临时实例：已停止并删除，未留下 `codex_probe_` 或 `codex-msmp-probe` 实例。
 - 测试报告与审计日志已做敏感字段/配置行脱敏。
 
@@ -42,6 +43,7 @@ MCSManager：
 
 RCON：
 
+- 配置读取与写入计划：`rcon.config.get`、`rcon.config.set` dry-run 通过 MCSManager 实例配置验证。
 - `rcon.command`
 - `rcon.list_players`
 - `rcon.time_query`
@@ -50,9 +52,19 @@ RCON：
 MSMP：
 
 - 真实启动 Minecraft Java 1.21.9 临时实例，开启 management server。
+- MCP 客户端不配置固定 MSMP URL/secret；探针通过 MCSManager 文件 API 写入和读取实例内 `server.properties` 后动态连接。
+- 配置读取与写入计划：`msmp.config.get`、`msmp.config.set` dry-run 通过。
 - 使用 `websocket-client` 连接 MSMP WebSocket，并完成 JSON-RPC 请求/响应。
 - 只读：`msmp.discover`、`msmp.call`、`msmp.players.list`、`msmp.server.status`、`msmp.bans.get`、`msmp.ip_bans.get`、`msmp.allowlist.get`、`msmp.operators.get`、`msmp.gamerules.get`、`msmp.server_settings.get`、`msmp.server_settings.list`
 - 写入：`msmp.server.save`、`msmp.server.stop`、`msmp.players.kick`、`msmp.gamerules.update`、`msmp.server_settings.set`、`msmp.allowlist.add/remove/set/clear`、`msmp.operators.add/remove/set/clear`、`msmp.bans.add/remove/set/clear`、`msmp.ip_bans.add/remove/set/clear`
+
+多服务器管理：
+
+- `scripts/multi_server_backend_probe.py` 创建两个临时 Minecraft 1.21.9 实例，分别配置独立的 game port、RCON port/password 和 MSMP port/secret。
+- MCP 客户端只配置 MCSManager；探针通过 `rcon.config.set` 写入实例 RCON 配置，通过 `msmp.config.set` 写入各自 `server.properties`。
+- 同一个 MCP stdio 进程中交替调用两个实例：`rcon.list_players`、`rcon.time_query`、`rcon.command`、`rcon.save_all`、`msmp.server.status`、`msmp.call`、`msmp.players.list`、`server.save_world`、`server.broadcast`。
+- 配置隔离校验：A/B 实例读取到不同的 RCON/MSMP 端口；A 的 `difficulty` 设置为 `peaceful`，B 的 `difficulty` 设置为 `normal`，并分别读回验证。
+- 当前真实环境只有一个 MCSManager daemon，因此本轮验证覆盖同一 daemon 下多实例管理；跨 daemon 管理依赖同样的 per-call `daemonId` 机制，但尚未在多 daemon 环境实测。
 
 ## 发现并修复的问题
 
@@ -64,6 +76,8 @@ MSMP：
 - 2026-04-15：新增整合包元数据第一阶段工具，支持 jar 元数据解析、modlist 快照和快照 diff；基础探针 79/79、MSMP 临时实例探针 58/58、单元测试 27/27 通过。
 - 2026-04-15：新增整合包应用与回滚工具，支持 cached snapshot、apply dry-run/confirm、rollback dry-run/confirm、空快照清理和 listing 不可靠时的 `current_paths`；基础探针 81/81、MSMP 临时实例探针 58/58、单元测试 31/31 通过。
 - 2026-04-15：新增整合包测试运行记录第三阶段工具，支持启动/崩溃签名分类、测试运行写入、列表和读取；基础探针 85/85、MSMP 临时实例探针 58/58、单元测试 37/37 通过，并完成真实 MCSManager 临时目录 confirm 级 apply/record/rollback 回归。
+- 2026-04-15：改为以 MCSManager API 作为 RCON/MSMP 的唯一配置来源；移除客户端固定 RCON/MSMP 连接配置，新增动态配置读取/写入工具；基础探针 90/90、MSMP 临时实例探针 58/58、单元测试 45/45 通过。
+- 2026-04-15：新增多服务器后端探针，验证同一个 MCP 进程按不同 `daemonId/uuid` 动态读取并连接两个实例的 RCON/MSMP；多服务器探针 69/69 通过，临时实例已清理。
 
 ## 复跑方式
 
@@ -74,10 +88,8 @@ MCSM_BASE_URL=http://your-mcsm-host:23333 \
 MCSM_API_KEY=replace-me \
 MCSM_DEFAULT_DAEMON_ID=replace-me \
 MCSM_DEFAULT_INSTANCE_UUID=replace-me \
-RCON_HOST=your-rcon-host \
-RCON_PORT=25575 \
-RCON_PASSWORD=replace-me \
 MINECRAFT_OPS_AUDIT_LOG=/tmp/minecraft-ops-mcp-probe-audit.jsonl \
+MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS=/tmp \
 python3 -B scripts/mcp_integration_probe.py > /tmp/minecraft-ops-mcp-probe-report.json
 ```
 
@@ -90,14 +102,31 @@ MCSM_DEFAULT_DAEMON_ID=replace-me \
 MCSM_DEFAULT_INSTANCE_UUID=replace-me \
 MCSM_TIMEOUT_SECONDS=180 \
 MINECRAFT_OPS_AUDIT_LOG=/tmp/minecraft-ops-mcp-msmp-probe-audit.jsonl \
+MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS=/tmp \
 python3 -B scripts/msmp_temp_instance_probe.py > /tmp/minecraft-ops-mcp-msmp-probe-report.json
+```
+
+多服务器 RCON/MSMP 探针：
+
+```bash
+MCSM_BASE_URL=http://your-mcsm-host:23333 \
+MCSM_API_KEY=replace-me \
+MCSM_DEFAULT_DAEMON_ID=replace-me \
+MCSM_DEFAULT_INSTANCE_UUID=replace-me \
+MCSM_TIMEOUT_SECONDS=180 \
+MINECRAFT_OPS_AUDIT_LOG=/tmp/minecraft-ops-mcp-multi-probe-audit.jsonl \
+MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS=/tmp \
+MINECRAFT_OPS_FILE_OPERATION_WHITELIST=/ \
+python3 -B scripts/multi_server_backend_probe.py > /tmp/minecraft-ops-mcp-multi-probe-report.json
 ```
 
 可选环境变量：
 
 - `MINECRAFT_VERSION`：默认 `1.21.9`
 - `MINECRAFT_SERVER_JAR_URL`：指定服务端 jar URL，省略时从 Mojang version manifest 获取
-- `MSMP_PROBE_HOST`：MSMP WebSocket 连接主机；默认从 `MCSM_BASE_URL` 的 hostname 派生
 - `MSMP_PROBE_PORT`：默认 `25686`
 - `MSMP_PROBE_GAME_PORT`：默认 `25666`
 - `MSMP_PROBE_SECRET`：省略时随机生成 40 位字母数字 secret
+- `MULTI_PROBE_PORT_BASE`：多服务器探针的端口基准，省略时随机选择。
+- `MULTI_PROBE_PREFIX`：多服务器探针临时实例名前缀。
+- `MINECRAFT_SERVER_JAR_PATH`：多服务器探针可复用本地 server jar，省略时先下载到 `/tmp` 再上传到各实例。
