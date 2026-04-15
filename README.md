@@ -16,6 +16,20 @@
 - 安全说明：[SECURITY.md](SECURITY.md)
 - 变更日志：[CHANGELOG.md](CHANGELOG.md)
 
+## Agent 使用建议
+
+建议把本 MCP 与 `minecraft-ops-runbook` skill 配合使用：
+
+- MCP 负责真实操作：MCSManager、RCON、MSMP、文件、快照、应用/回滚、测试运行记录。
+- Skill 负责操作顺序：先读配置和安全策略，再做只读检查、dry-run、等待用户确认，最后记录证据。
+
+常见任务入口：
+
+- 健康检查：读取 `minecraft-ops://config`、`minecraft-ops://safety`，再查实例、日志、玩家和状态。
+- 安全重启：先查在线玩家、广播、保存世界，再 dry-run 重启，最后确认执行。
+- 整合包兼容测试：`snapshot -> diff -> apply dry-run -> apply confirm -> logs/crash -> classify -> record_test_run -> rollback dry-run/confirm`。
+- 性能排查：优先用 spark/Observable 等 mod 自带命令采样，再用日志、TPS/MSPT、实体/区块证据定位。
+
 ## 运行方式
 
 推荐在当前 Python 环境中安装项目依赖后运行：

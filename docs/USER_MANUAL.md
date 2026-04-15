@@ -987,3 +987,70 @@ management-server-tls-enabled=false
 3. `file.touch` 和 `file.write` 写 `eula.txt`、`server.properties`、`run.sh`。
 4. `server.start` 启动。
 5. `msmp.discover` 验证 MSMP。
+
+整合包兼容性测试闭环：
+
+1. 读取 `minecraft-ops://config` 和 `minecraft-ops://safety`，确认默认实例和高风险确认规则。
+2. 用 `server.get_instance`、`server.get_logs`、`file.list` 检查测试实例状态。
+3. 用 `modpack.snapshot_modlist` 生成基线快照：
+
+```json
+{
+  "mods_dir": "mods",
+  "snapshot_name": "baseline-before-candidate-a",
+  "minecraft_version": "1.21.1",
+  "loader": "fabric"
+}
+```
+
+4. 让 agent 查询 Modrinth、CurseForge、GitHub Releases 等外部资料，确定候选版本组合。MCP 不负责联网查询这些资料。
+5. 将候选 jar 放到 MCP 宿主机允许目录，或准备带 `url` / `localPath` / cached blob 的目标 snapshot。
+6. 用 `modpack.snapshot_modlist` 生成候选快照；再用 `modpack.diff_snapshots` 对比基线和候选。
+7. 用 `modpack.apply_modlist` 先 dry-run：
+
+```json
+{
+  "manifest_path": "/srv/minecraft-ops/modpack-workspace/snapshots/candidate-a.json",
+  "mods_dir": "mods",
+  "clean_extra": true,
+  "dry_run": true
+}
+```
+
+8. 确认 `missingSources` 为 `0`，并向用户报告 upload / replace / delete 计划。只有用户明确同意后才传 `confirm=true`。
+9. 启动测试实例，读取 `logs/latest.log` 或 crash report。
+10. 用 `modpack.classify_startup_result` 对启动结果分类：
+
+```json
+{
+  "log_path": "logs/latest.log",
+  "max_chars": 262144
+}
+```
+
+11. 用 `modpack.record_test_run` 记录本轮结果：
+
+```json
+{
+  "run_name": "candidate-a-startup",
+  "scenario": "startup",
+  "outcome": "failed",
+  "before_snapshot_id": "baseline-snapshot-id",
+  "after_snapshot_id": "candidate-snapshot-id",
+  "classification": {
+    "status": "failure",
+    "category": "mod_resolution"
+  },
+  "tags": ["compat", "startup"],
+  "notes": "候选 A 启动失败，下一轮只调整缺失依赖。"
+}
+```
+
+12. 如果失败，先用 `modpack.rollback_snapshot` dry-run，再在用户确认后回滚。
+13. 用 `modpack.list_test_runs` 和 `modpack.get_test_run` 汇总历史候选组合，避免重复测试同一组合。
+
+当 MCSManager 目录 listing 为空或不可靠时：
+
+- `modpack.snapshot_modlist` 传 `remote_paths`。
+- `modpack.apply_modlist` 和 `modpack.rollback_snapshot` 传 `current_paths`。
+- 不传这些显式路径时，工具无法发现额外 jar，也就不能安全删除或回滚它们。
