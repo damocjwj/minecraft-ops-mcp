@@ -29,13 +29,15 @@ Against a disposable MCSManager/Minecraft environment:
 ```bash
 python3 -B scripts/mcp_integration_probe.py > /tmp/minecraft-ops-mcp-probe-report.json
 python3 -B scripts/msmp_temp_instance_probe.py > /tmp/minecraft-ops-mcp-msmp-probe-report.json
+python3 -B scripts/multi_server_backend_probe.py > /tmp/minecraft-ops-mcp-multi-probe-report.json
 ```
 
 Expected result:
 
 - base probe: all passed
 - MSMP probe: all passed
-- no `codex_probe_` or `codex-msmp-probe` temporary instances remain
+- multi-server RCON/MSMP probe: all passed
+- no `codex_probe_`, `codex-msmp-probe`, or `codex-multi-probe` temporary instances remain
 
 ## Secret Hygiene
 

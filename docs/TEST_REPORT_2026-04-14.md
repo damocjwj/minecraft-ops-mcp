@@ -11,7 +11,7 @@
 - 单元测试：45/45 通过。
 - MCP 初始化协议版本：`2025-11-25`。
 - 打包验证：生成 `minecraft_ops_mcp-0.8.0-py3-none-any.whl`。
-- 临时实例：已停止并删除，未留下 `codex_probe_` 或 `codex-msmp-probe` 实例。
+- 临时实例：已停止并删除，未留下 `codex_probe_`、`codex-msmp-probe` 或 `codex-multi-probe` 实例。
 - 测试报告与审计日志已做敏感字段/配置行脱敏。
 
 ## 覆盖范围

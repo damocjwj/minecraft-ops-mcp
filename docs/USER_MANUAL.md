@@ -1,41 +1,21 @@
 # Minecraft Ops MCP 用户手册
 
-本文面向 MCP 使用者，说明如何配置、调用和安全地使用 `minecraft-ops-mcp` 管理 Minecraft 服务器。
+本手册面向通过 MCP 客户端调用 `minecraft-ops-mcp` 的 agent 或运维人员，重点说明如何安全选工具。
 
-## 1. 能力概览
+## 1. 基本模型
 
-`minecraft-ops-mcp` 是一个通过 stdio 运行的 MCP 服务，给 agent 暴露 Minecraft 运维工具。它当前支持 3 类后端：
+MCSManager 是主接口。RCON 和 MSMP 不作为全局客户端 endpoint 配置。每次工具调用会先通过 `daemonId` 和 `uuid` 选择目标实例，再从该实例读取协议配置：
 
-- MCSManager API：管理节点、实例、日志、文件、上传、实例启停、控制台命令。
-- RCON：向 Minecraft 服务端发送传统 RCON 命令。
-- MSMP：Minecraft Java 1.21.9+ 的 Minecraft Server Management Protocol，用于结构化查询和修改玩家、白名单、OP、游戏规则和服务器设置。
+- RCON：MCSManager 实例配置中的 `enableRcon`、`rconIp`、`rconPort`、`rconPassword`。
+- MSMP：实例文件 `server.properties` 中的 `management-server-*`。
 
-推荐使用方式：
+如果调用时不传 `daemonId` 或 `uuid`，会使用 `MCSM_DEFAULT_DAEMON_ID` 和 `MCSM_DEFAULT_INSTANCE_UUID`。多服务器操作必须显式传目标 id。
 
-- 实例、文件、日志、上传下载：优先使用 MCSManager 工具。
-- 玩家、白名单、OP、gamerule、server settings：优先使用 MSMP 工具。
-- 旧版本服务端或 MSMP 没覆盖的命令：使用 RCON 或 MCSManager 控制台命令兜底。
+当协议 host 是 `0.0.0.0`、`127.0.0.1`、`localhost` 或空值时，MCP 默认使用 MCSManager 的 hostname 作为连接 host。复杂网络环境可以在 RCON/MSMP 工具中传 `connection_host` 覆盖。
 
-## 2. 安装与启动
+## 2. 客户端配置
 
-项目需要 Python 3.12+，并依赖官方 MCP Python SDK 与 `websocket-client`。推荐先安装为可编辑包：
-
-```bash
-cd /home/damoc/codes/minecraft-ops-mcp
-python3 -m pip install -e .
-minecraft-ops-mcp
-```
-
-开发调试时也可以直接从源码运行：
-
-```bash
-cd /home/damoc/codes/minecraft-ops-mcp
-PYTHONPATH=src python3 -m minecraft_ops_mcp
-```
-
-## 3. MCP 客户端配置
-
-把下面配置加入你的 MCP 客户端。请替换其中的占位值，不要把真实密钥提交到仓库。
+最小 MCP 客户端配置：
 
 ```json
 {
@@ -46,1080 +26,292 @@ PYTHONPATH=src python3 -m minecraft_ops_mcp
       "cwd": "/home/damoc/codes/minecraft-ops-mcp",
       "env": {
         "PYTHONPATH": "src",
-        "MCSM_BASE_URL": "http://your-mcsm-host:23333",
+        "MCSM_BASE_URL": "http://127.0.0.1:23333",
         "MCSM_API_KEY": "replace-me",
         "MCSM_DEFAULT_DAEMON_ID": "replace-me",
         "MCSM_DEFAULT_INSTANCE_UUID": "replace-me",
-        "MINECRAFT_OPS_RCON_TIMEOUT_SECONDS": "5",
-        "MINECRAFT_OPS_RCON_ENCODING": "utf-8",
-        "MINECRAFT_OPS_MSMP_TIMEOUT_SECONDS": "8",
-        "MINECRAFT_OPS_MSMP_TLS_VERIFY": "true",
-        "MINECRAFT_OPS_RAW_COMMAND_ALLOWLIST": "list,time,help",
-        "MINECRAFT_OPS_RAW_COMMAND_DENYLIST": "stop,op,deop,ban,ban-ip",
-        "MINECRAFT_OPS_MAX_BYTES": "268435456",
-        "MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS": "/tmp/minecraft-ops-mcp-downloads,/srv/minecraft-staging",
-        "MINECRAFT_OPS_FILE_OPERATION_WHITELIST": "server.properties,config,mods,logs,crash-reports",
-        "MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS": "example.com,cdn.example.com",
-        "MINECRAFT_OPS_MODPACK_WORKSPACE": "/srv/minecraft-ops/modpack-workspace"
+        "MINECRAFT_OPS_AUDIT_LOG": "/tmp/minecraft-ops-mcp-audit.jsonl"
       }
     }
   }
 }
 ```
 
-常用环境变量：
+不要在客户端配置固定 RCON host/password 或 MSMP URL/secret。请用 `rcon.config.*` 和 `msmp.config.*` 按实例管理。
 
-- `MCSM_BASE_URL`：MCSManager 面板地址，例如 `http://host:23333`。
-- `MCSM_API_KEY`：MCSManager API key。
-- `MCSM_DEFAULT_DAEMON_ID`：默认 daemon 节点 ID，省略工具参数时使用。
-- `MCSM_DEFAULT_INSTANCE_UUID`：默认实例 UUID，省略工具参数时使用。
-- `MINECRAFT_OPS_RCON_TIMEOUT_SECONDS`、`MINECRAFT_OPS_RCON_ENCODING`：RCON 连接的通用超时和编码。具体 host、port、password 从 MCSManager 实例配置读取。
-- `MINECRAFT_OPS_MSMP_TIMEOUT_SECONDS`、`MINECRAFT_OPS_MSMP_TLS_VERIFY`：MSMP 连接的通用超时和 TLS 校验默认值。具体 URL 和 secret 从实例内 `server.properties` 读取。
-- `MINECRAFT_OPS_AUDIT_LOG`：审计日志位置，默认 `/tmp/minecraft-ops-mcp-audit.jsonl`；置空可关闭。
-- `MINECRAFT_OPS_RAW_COMMAND_ALLOWLIST`：可选，逗号分隔的原始命令前缀白名单，例如 `list,time,help`。
-- `MINECRAFT_OPS_RAW_COMMAND_DENYLIST`：可选，逗号分隔的原始命令前缀黑名单，例如 `stop,op,deop,ban,ban-ip`。
-- `MINECRAFT_OPS_MAX_BYTES`：文件上传/下载最大字节数，默认 `268435456`。
-- `MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS`：可选，逗号分隔的 MCP 宿主机目录白名单，限制 `file.upload_local` 的本地来源和 `file.download_local` 的本地输出位置。
-- `MINECRAFT_OPS_FILE_OPERATION_WHITELIST`：可选，逗号分隔的实例内路径前缀白名单，限制写入、上传目录和下载源文件路径。
-- `MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS`：可选，逗号分隔的 `file.upload_url` 远程 URL 域名白名单；支持子域名匹配。
-- `MINECRAFT_OPS_MODPACK_WORKSPACE`：整合包快照 JSON 保存目录，默认 `/tmp/minecraft-ops-mcp-modpacks`。
+重要可选变量：
 
-RCON 和 MSMP 的连接参数不应写在 MCP 客户端配置里。多服务器管理时，同一个 MCP 实例通过 MCSManager 的 `daemonId` 和 `uuid` 选择目标实例，并动态读取：
+- `MCSM_TIMEOUT_SECONDS`：MCSManager HTTP 超时。
+- `MINECRAFT_OPS_RCON_TIMEOUT_SECONDS`、`MINECRAFT_OPS_RCON_ENCODING`：解析出实例 RCON endpoint 后使用的连接默认值。
+- `MINECRAFT_OPS_MSMP_TIMEOUT_SECONDS`、`MINECRAFT_OPS_MSMP_TLS_VERIFY`：解析出实例 MSMP endpoint 后使用的连接默认值。
+- `MINECRAFT_OPS_RAW_COMMAND_ALLOWLIST`：原始命令前缀白名单。
+- `MINECRAFT_OPS_RAW_COMMAND_DENYLIST`：原始命令前缀黑名单。
+- `MINECRAFT_OPS_MAX_BYTES`：上传/下载大小限制。
+- `MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS`：MCP 宿主机本地上传来源和下载目标目录白名单。
+- `MINECRAFT_OPS_FILE_OPERATION_WHITELIST`：实例内写入、上传、下载路径前缀白名单。
+- `MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS`：`file.upload_url` 允许拉取的域名。
+- `MINECRAFT_OPS_MODPACK_WORKSPACE`：快照、jar 缓存和测试记录工作区。
 
-- RCON：MCSManager 实例配置中的 `enableRcon`、`rconIp`、`rconPort`、`rconPassword`。
-- MSMP：目标实例 `server.properties` 中的 `management-server-enabled`、`management-server-host`、`management-server-port`、`management-server-secret`、`management-server-tls-enabled`。
+## 3. 安全约定
 
-## 4. 安全模型
+高风险工具必须传 `dry_run=true` 或 `confirm=true`。
 
-高风险工具默认不会执行，必须显式传入：
+高风险类别：
 
-```json
-{ "confirm": true }
-```
+- 实例启动、停止、重启、kill；
+- MCSManager 控制台命令、RCON 原始命令、任意 MSMP call；
+- 文件写入、上传、删除、移动、复制、压缩、解压；
+- 实例创建、更新、patch、克隆、删除、重装；
+- 协议配置修改：`rcon.config.set`、`msmp.config.set`；
+- 踢人、封禁、白名单、OP、gamerule、server settings 修改；
+- 整合包应用和回滚。
 
-如果只想让 agent 预览会执行什么，传：
+推荐步骤：
 
-```json
-{ "dry_run": true }
-```
+1. 读取当前状态；
+2. 用 `dry_run=true` 预览；
+3. 给出目标实例和预期改动；
+4. 用户明确批准后用 `confirm=true` 执行；
+5. 再读一次状态验证。
 
-高风险操作包括：
+不要输出 API key、RCON password、MSMP secret、上传/下载 token 或包含 secret 的完整配置行。
 
-- 实例启停、重启、强杀、删除、重装、更新任务。
-- 原始控制台命令和 RCON 命令。
-- 文件写入、删除、移动、复制、压缩、解压、上传，以及下载到 MCP 本机。
-- MSMP 的踢人、保存、停服、封禁、白名单、OP、游戏规则和服务器设置修改。
+## 4. MCP 资源和提示词
 
-工具调用会写入审计日志，参数中的密码、token、secret 等敏感字段会被脱敏。审计日志不要公开。
+常用资源：
 
-如果配置了原始命令 allowlist，`server.send_command` 和 `rcon.command` 只允许命中白名单前缀的单行命令；如果配置了 denylist，命中黑名单前缀的命令会被拒绝。前缀按命令首段匹配，例如 `ban Steve` 会命中 `ban`。
+- `minecraft-ops://config`：脱敏后的运行配置。
+- `minecraft-ops://safety`：高风险工具和原始命令策略。
+- `minecraft-ops://tools`：完整工具目录和 schema。
 
-## 5. MCP Resources 和 Prompts
+内置提示词：
 
-可读取的 resources：
+- `minecraft_health_check`
+- `minecraft_safe_restart`
 
-- `minecraft-ops://config`：脱敏后的后端配置状态。
-- `minecraft-ops://safety`：高风险工具列表和确认规则。
-- `minecraft-ops://tools`：完整工具目录和 JSON Schema。
+提示词只是起点，实际工具调用仍遵守安全约定。
 
-内置 prompts：
+## 5. 工具路由
 
-- `minecraft_health_check`：健康检查流程，适合先看实例、日志、玩家和状态。
-- `minecraft_safe_restart`：安全重启流程，先检查、广播、保存，再 dry-run，最后确认重启。
+MCSManager 平台操作：
 
-## 6. MCSManager 工具
+- `server.list_daemons`
+- `server.list_instances`
+- `server.get_instance`
+- `server.get_logs`
+- `server.start`、`server.stop`、`server.restart`、`server.kill`
+- `server.send_command`
+- `instance.*`
+- `file.*`
 
-### 6.1 节点与实例只读工具
+RCON 适用于旧版本服务端或 MSMP 未覆盖的命令：
 
-`server.list_daemons`
+- `rcon.config.get`、`rcon.config.set`
+- `rcon.list_players`
+- `rcon.time_query`
+- `rcon.save_all`
+- `rcon.command`
 
-列出 MCSManager daemon 节点。常用于获取 `daemonId`。
+MSMP 适用于 Minecraft Java 1.21.9+ 的结构化管理：
+
+- `msmp.config.get`、`msmp.config.set`
+- `msmp.discover`、`msmp.call`
+- `msmp.server.status`、`msmp.server.save`、`msmp.server.stop`
+- `msmp.players.*`
+- `msmp.bans.*`、`msmp.ip_bans.*`
+- `msmp.allowlist.*`、`msmp.operators.*`
+- `msmp.gamerules.*`、`msmp.server_settings.*`
+
+整合包工具：
+
+- `modpack.inspect_jar`
+- `modpack.snapshot_modlist`
+- `modpack.diff_snapshots`
+- `modpack.apply_modlist`
+- `modpack.rollback_snapshot`
+- `modpack.classify_startup_result`
+- `modpack.record_test_run`
+- `modpack.list_test_runs`
+- `modpack.get_test_run`
+
+## 6. 目标选择
+
+默认实例：
 
 ```json
 {}
 ```
 
-`server.get_daemon_system`
-
-读取 daemon 系统状态摘要，例如 daemon 版本、CPU、内存、实例数量。
-
-```json
-{}
-```
-
-`server.list_instances`
-
-列出某 daemon 下的实例。
-
-```json
-{
-  "daemonId": "optional-daemon-id",
-  "page": 1,
-  "page_size": 20,
-  "instance_name": "",
-  "status": ""
-}
-```
-
-`server.get_instance`
-
-读取实例详情。如果配置了默认 daemon 和实例 UUID，可不传参数。
-
-```json
-{
-  "daemonId": "optional-daemon-id",
-  "uuid": "optional-instance-uuid"
-}
-```
-
-`server.get_logs`
-
-读取实例输出日志。
-
-```json
-{
-  "daemonId": "optional-daemon-id",
-  "uuid": "optional-instance-uuid",
-  "size": 2048
-}
-```
-
-### 6.2 实例生命周期工具
-
-这些工具都要求 `confirm=true`，或用 `dry_run=true` 预览。
-
-`server.start`
-
-启动实例。
-
-```json
-{ "confirm": true }
-```
-
-`server.stop`
-
-优雅停止实例。
-
-```json
-{ "confirm": true }
-```
-
-`server.restart`
-
-重启实例。
-
-```json
-{ "confirm": true }
-```
-
-`server.kill`
-
-强制结束实例进程。只在普通停止失败时使用。
-
-```json
-{ "dry_run": true }
-```
-
-`server.send_command`
-
-通过 MCSManager 控制台发送单行命令。
-
-```json
-{
-  "command": "list",
-  "confirm": true
-}
-```
-
-### 6.3 实例配置工具
-
-`instance.create`
-
-创建实例，`config` 使用 MCSManager 的 InstanceConfig 对象。建议先 dry-run，再确认执行。
+指定实例：
 
 ```json
 {
   "daemonId": "daemon-id",
-  "config": {
-    "nickname": "example",
-    "startCommand": "java -jar server.jar nogui",
-    "stopCommand": "stop",
-    "cwd": "/opt/mcsmanager/daemon/data/InstanceData/example",
-    "type": "minecraft/java",
-    "processType": "general"
-  },
-  "dry_run": true
+  "uuid": "instance-uuid"
 }
 ```
 
-`instance.update_config`
+同时处理多个服务器时，每次调用都显式传 `daemonId` 和 `uuid`，不要依赖默认目标。
 
-更新实例配置。传入完整或 MCSManager 接受的配置对象。
+## 7. RCON 操作
 
-```json
-{
-  "config": {
-    "nickname": "example",
-    "enableRcon": true,
-    "rconIp": "127.0.0.1",
-    "rconPort": 25575,
-    "rconPassword": "replace-me"
-  },
-  "confirm": true
-}
-```
-
-`instance.update_config_patch`
-
-先读取当前实例配置，深度合并 `patch`，再提交更新。适合只改少数字段；建议先 dry-run 查看 diff。
-
-```json
-{
-  "patch": {
-    "enableRcon": true,
-    "rconIp": "127.0.0.1",
-    "rconPort": 25575
-  },
-  "dry_run": true
-}
-```
-
-`instance.clone_from_template`
-
-读取一个现有实例的配置，去掉明显的运行态字段后创建新实例。实际可用性仍取决于 MCSManager 的 InstanceConfig 字段是否完整，生产使用前必须 dry-run 并检查 `cwd`、`nickname`、端口和启动命令。
-
-```json
-{
-  "source_daemonId": "source-daemon-id",
-  "source_uuid": "source-instance-uuid",
-  "daemonId": "target-daemon-id",
-  "nickname": "new-pack-test",
-  "cwd": "/opt/mcsmanager/daemon/data/InstanceData/new-pack-test",
-  "overrides": {
-    "startCommand": "java -Xmx4G -jar server.jar nogui"
-  },
-  "dry_run": true
-}
-```
-
-`instance.delete`
-
-删除实例，可选择一并删除实例文件。
+读取配置：
 
 ```json
 {
   "daemonId": "daemon-id",
-  "uuids": ["instance-uuid"],
-  "deleteFile": true,
-  "confirm": true
+  "uuid": "instance-uuid"
 }
 ```
 
-`instance.reinstall`
+`rcon.config.get` 返回脱敏字段：`enabled`、`configuredHost`、`connectionHost`、`port`、`passwordSet`、`source`。
 
-从安装包 URL 重装实例。
-
-```json
-{
-  "targetUrl": "https://example.com/server.zip",
-  "title": "reinstall",
-  "description": "operator approved",
-  "dry_run": true
-}
-```
-
-`instance.run_update_task`
-
-运行实例配置里的 update task。
-
-```json
-{ "dry_run": true }
-```
-
-## 7. 文件工具
-
-MCSManager 文件路径建议使用相对路径，例如 `server.properties`、`world/level.dat`。部分 MCSManager 版本对 `/xxx` 这类根路径写入会报 `Illegal access path`。
-
-`file.list`
-
-列出目录内容。
+修改配置：
 
 ```json
 {
-  "target": "/",
-  "page": 0,
-  "page_size": 100
-}
-```
-
-注意：实测某些 MCSManager 实例会返回正确 `absolutePath` 但 `items` 为空；这不影响 `file.read`、`file.write`、上传、复制、移动等工具。
-
-`file.read`
-
-读取文本文件。
-
-```json
-{ "target": "server.properties" }
-```
-
-`file.touch`
-
-创建空文件。对不存在的新文件，建议先 `touch` 再 `write`。
-
-```json
-{ "target": "notes.txt" }
-```
-
-`file.write`
-
-写入文本文件。要求 `confirm=true`。
-
-```json
-{
-  "target": "notes.txt",
-  "text": "hello\n",
-  "confirm": true
-}
-```
-
-`file.write_new`
-
-对新文件执行 `touch -> write`，默认不覆盖已存在文件。这个工具用于规避部分 MCSManager 版本直接写不存在文件时的路径/创建问题。
-
-```json
-{
-  "target": "notes.txt",
-  "text": "hello\n",
-  "overwrite": false,
-  "confirm": true
-}
-```
-
-`file.mkdir`
-
-创建目录。
-
-```json
-{ "target": "backups" }
-```
-
-`file.copy`
-
-复制文件或目录，`targets` 是 `[source, target]` 数组列表。
-
-```json
-{
-  "targets": [["notes.txt", "notes-copy.txt"]],
-  "confirm": true
-}
-```
-
-`file.move`
-
-移动或重命名文件或目录。
-
-```json
-{
-  "targets": [["notes-copy.txt", "archive/notes.txt"]],
-  "confirm": true
-}
-```
-
-`file.delete`
-
-删除文件或目录。
-
-```json
-{
-  "targets": ["notes.txt", "archive"],
-  "confirm": true
-}
-```
-
-`file.compress`
-
-创建 zip 压缩包。
-
-```json
-{
-  "source": "world-backup.zip",
-  "targets": ["world"],
-  "confirm": true
-}
-```
-
-`file.uncompress`
-
-解压 zip。
-
-```json
-{
-  "source": "world-backup.zip",
-  "target": "restore",
-  "code": "utf-8",
-  "confirm": true
-}
-```
-
-`file.upload_prepare`
-
-创建临时上传 token。一般只有调试或自定义上传流程才需要直接用。
-
-```json
-{ "upload_dir": "/" }
-```
-
-`file.upload_local`
-
-把 MCP 服务所在机器上的本地文件流式上传到实例目录，不会一次性把文件读入内存。受 `MINECRAFT_OPS_MAX_BYTES` 和 `MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS` 约束。
-
-```json
-{
-  "upload_dir": "/",
-  "local_path": "/tmp/server.jar",
-  "remote_name": "server.jar",
-  "max_bytes": 268435456,
-  "confirm": true
-}
-```
-
-`file.upload_url`
-
-MCP 服务先从 `http://` 或 `https://` URL 流式下载到临时文件，再流式上传到实例目录。默认最大文件大小来自 `MINECRAFT_OPS_MAX_BYTES`，也可用工具参数 `max_bytes` 调整。若配置了 `MINECRAFT_OPS_UPLOAD_URL_ALLOWED_DOMAINS`，只允许从白名单域名或其子域名拉取。
-
-```json
-{
-  "url": "https://example.com/server.jar",
-  "upload_dir": "/",
-  "remote_name": "server.jar",
-  "max_bytes": 536870912,
-  "confirm": true
-}
-```
-
-如果 MCSManager daemon 返回 `localhost:24444` 但 MCP 机器不能访问这个地址，可传：
-
-```json
-{
-  "upload_dir": "/",
-  "local_path": "/tmp/server.jar",
-  "remote_name": "server.jar",
-  "daemon_public_base_url": "http://daemon-host:24444",
-  "confirm": true
-}
-```
-
-`file.download_prepare`
-
-创建临时下载 token。一般只有调试或自定义下载流程才需要直接用。
-
-```json
-{ "file_name": "server.properties" }
-```
-
-`file.download_local`
-
-把实例中的单个文件流式下载到 MCP 服务所在机器。默认输出到 `/tmp/minecraft-ops-mcp-downloads/<文件名>`；如果指定 `local_path` 且文件已存在，默认会拒绝覆盖。受 `MINECRAFT_OPS_MAX_BYTES` 和 `MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS` 约束。
-
-```json
-{
-  "file_name": "server.properties",
-  "local_path": "/tmp/minecraft-ops-mcp-downloads/server.properties",
-  "max_bytes": 268435456,
-  "overwrite": true,
-  "confirm": true
-}
-```
-
-## 8. 整合包元数据工具
-
-这些工具用于兼容性测试：解析 mod jar 元数据、生成 modlist 快照、比较两次快照差异，并把目标 modlist 应用到测试实例或回滚到旧快照。外部版本资料查询仍由 agent 完成，MCP 负责真实文件、hash、jar 内元数据、应用计划和可追溯快照。
-
-`modpack.inspect_jar`
-
-解析单个 jar。可以读取 MCP 宿主机本地 jar，也可以读取实例内 jar；读取本地 jar 时受 `MINECRAFT_OPS_UPLOAD_ALLOWED_DIRS` 约束。
-
-```json
-{
-  "remote_path": "mods/example.jar",
-  "max_bytes": 268435456
-}
-```
-
-返回字段包括 `sha256`、`metadataFiles`、`detectedLoaders`、`primaryMod`、`mods` 和解析错误列表。当前支持 `fabric.mod.json`、`quilt.mod.json`、`META-INF/mods.toml`、`META-INF/neoforge.mods.toml`、`mcmod.info`。
-
-`modpack.snapshot_modlist`
-
-扫描 `mods` 目录中的 jar，生成结构化快照。默认保存到 `MINECRAFT_OPS_MODPACK_WORKSPACE/snapshots/<snapshot_id>.json`，并把 jar 内容缓存到 `MINECRAFT_OPS_MODPACK_WORKSPACE/blobs/`，供后续应用或回滚使用。
-
-```json
-{
-  "mods_dir": "mods",
-  "snapshot_name": "baseline-before-updating-sodium",
-  "minecraft_version": "1.21.1",
-  "loader": "fabric",
-  "save": true
-}
-```
-
-也可以扫描 MCP 宿主机本地目录：
-
-```json
-{
-  "local_dir": "/srv/minecraft-staging/mods",
-  "snapshot_name": "candidate-a",
-  "save": true
-}
-```
-
-如果当前 MCSManager 版本的目录 listing 不可靠，可以显式传入实例内 jar 路径：
-
-```json
-{
-  "mods_dir": "mods",
-  "remote_paths": ["mods/sodium.jar", "mods/iris.jar"],
-  "snapshot_name": "known-current"
-}
-```
-
-`modpack.diff_snapshots`
-
-比较两个快照。可以直接传入快照对象，也可以传 `before_path` / `after_path` 或 `before_snapshot_id` / `after_snapshot_id`。路径必须位于 `MINECRAFT_OPS_MODPACK_WORKSPACE` 内。
-
-```json
-{
-  "before_snapshot_id": "20260415T010000Z-baseline-abcdef123456",
-  "after_snapshot_id": "20260415T011500Z-candidate-a-fedcba654321"
-}
-```
-
-结果会列出文件层面的新增、删除、变化，以及按 `modId` 解析出的新增、删除、版本变化；同版本但 hash 改变会进入 warnings。
-
-`modpack.apply_modlist`
-
-把目标快照或 lockfile 应用到实例内 `mods` 目录。该工具会先生成 before 快照作为回滚点，再上传缺失/变化 jar，并在 `clean_extra=true` 时删除目标快照中不存在的额外 jar。必须先 `dry_run=true` 查看计划，确认后再 `confirm=true`。
-
-```json
-{
-  "manifest_path": "/srv/minecraft-ops/modpack-workspace/snapshots/candidate-a.json",
-  "mods_dir": "mods",
-  "clean_extra": true,
-  "dry_run": true
-}
-```
-
-如果目录 listing 不可靠，传入当前已知 jar 路径：
-
-```json
-{
-  "manifest": { "kind": "modpackSnapshot" },
-  "mods_dir": "mods",
-  "current_paths": ["mods/old-sodium.jar", "mods/old-iris.jar"],
-  "confirm": true
-}
-```
-
-`modpack.rollback_snapshot`
-
-将实例内 `mods` 目录恢复到某个快照。它内部复用 apply 计划：上传快照中的 jar，删除快照外的 jar。也必须先 dry-run。
-
-```json
-{
-  "snapshot_id": "20260415T010000Z-baseline-abcdef123456",
-  "mods_dir": "mods",
-  "current_paths": ["mods/sodium.jar", "mods/iris.jar"],
-  "dry_run": true
-}
-```
-
-对空快照回滚是合法操作，含义是删除当前 `mods_dir` 中已知的 jar；在 listing 不可靠的环境中必须提供 `current_paths`。
-
-`modpack.classify_startup_result`
-
-根据 `latest.log`、控制台摘录或 crash report 判断一次启动结果。可以直接传文本，也可以传实例内远程路径。工具只做签名级辅助分类，不替代人工阅读完整日志。
-
-```json
-{
-  "log_path": "logs/latest.log",
-  "crash_report_path": "crash-reports/crash-2026-04-15_12.00.00-server.txt",
-  "max_chars": 262144
-}
-```
-
-常见分类包括：
-
-- `mod_resolution`：Fabric/Quilt/Forge 依赖解析失败、缺依赖或版本范围不满足。
-- `java_version`：Java 版本低于服务端或 mod 编译目标。
-- `mixin_failure`：mixin 应用失败，通常需要定位 owning mod 与目标 MC/loader 版本。
-- `binary_incompatibility`：`NoSuchMethodError`、`NoSuchFieldError` 等版本组合不兼容。
-- `missing_dependency_or_wrong_side`：缺类、客户端 mod 放到服务端、环境侧错误。
-- `duplicate_mod`、`config_error`、`port_conflict`、`startup_failure`。
-
-返回结果包含 `status`、`category`、`confidence`、匹配签名、证据行和建议下一步。
-
-`modpack.record_test_run`
-
-保存一次兼容性测试运行记录到 `MINECRAFT_OPS_MODPACK_WORKSPACE/runs/<run_id>.json`。适合在每次版本组合测试后记录：候选组合、before/after 快照、apply/rollback 摘要、启动分类、日志摘录、外部资料链接和备注。
-
-```json
-{
-  "run_name": "sodium-iris-candidate-a",
-  "scenario": "startup",
-  "outcome": "failed",
-  "target": {
-    "minecraftVersion": "1.21.1",
-    "loader": "fabric"
-  },
-  "candidate": {
-    "changedMods": ["sodium", "iris"]
-  },
-  "before_snapshot_id": "20260415T010000Z-baseline-abcdef123456",
-  "after_snapshot_id": "20260415T011500Z-candidate-a-fedcba654321",
-  "classification": {
-    "status": "failure",
-    "category": "mod_resolution"
-  },
-  "log_excerpt": "ModResolutionException: ...",
-  "tags": ["compat", "startup"],
-  "notes": "候选 A 缺少依赖，下一轮只替换该依赖。"
-}
-```
-
-日志摘录会被限制长度；不要把完整大日志直接当作测试记录长期保存。完整日志仍应保留在实例或外部日志系统中。
-
-`modpack.list_test_runs`
-
-列出已保存的测试运行摘要，可按 `outcome`、`scenario` 或 `tag` 过滤。
-
-```json
-{
-  "limit": 20,
-  "outcome": "failed",
-  "tag": "startup"
-}
-```
-
-`modpack.get_test_run`
-
-读取单条测试运行记录。可以传 `run_id` 或 workspace 内的 `run_path`。
-
-```json
-{
-  "run_id": "20260415T020000Z-sodium-iris-candidate-a-abcdef123456"
-}
-```
-
-## 9. RCON 工具
-
-`rcon.config.get`
-
-通过 MCSManager 实例配置读取 RCON 设置，不返回明文密码。
-
-```json
-{
-  "daemonId": "optional-daemon-id",
-  "uuid": "optional-instance-uuid"
-}
-```
-
-返回字段包括 `enabled`、`configuredHost`、`connectionHost`、`port`、`passwordSet`。如果 `rconIp` 是 `127.0.0.1`、`0.0.0.0` 或空值，工具会默认使用 `MCSM_BASE_URL` 的 hostname 作为连接目标；复杂网络拓扑可在调用 RCON 工具时传 `connection_host` 覆盖。
-
-`rcon.config.set`
-
-通过 MCSManager API 修改实例配置中的 RCON 字段。该工具要求 `dry_run=true` 或 `confirm=true`。
-
-```json
-{
+  "daemonId": "daemon-id",
+  "uuid": "instance-uuid",
   "enabled": true,
-  "rcon_ip": "127.0.0.1",
+  "rcon_ip": "0.0.0.0",
   "rcon_port": 25575,
-  "rcon_password": "replace-me",
+  "rcon_password": "replace-with-strong-password",
   "dry_run": true
 }
 ```
 
-修改 RCON 配置通常需要重启实例后才会被 Minecraft 服务端加载。不要在公共网络开放无防护 RCON；推荐绑定 localhost、VPN 或受控内网。
+确认后改用 `confirm=true`。Minecraft 通常需要重启后才会加载新的 RCON 设置。
 
-`rcon.command`
-
-向 Minecraft RCON 发送单行命令。连接信息从 MCSManager 实例配置动态读取，并要求传 `confirm=true`。
-
-```json
-{
-  "command": "list",
-  "confirm": true
-}
-```
-
-RCON 是明文协议，不建议暴露到公网。优先绑定 localhost、VPN 或隧道。
-
-低风险 RCON 封装：
-
-`rcon.list_players`
-
-固定执行 `list`，用于查看在线玩家，不需要 `confirm=true`。
-
-```json
-{
-  "daemonId": "optional-daemon-id",
-  "uuid": "optional-instance-uuid"
-}
-```
-
-`rcon.time_query`
-
-固定执行 `time query daytime|gametime|day`。
+常用检查：
 
 ```json
 { "query": "daytime" }
 ```
 
-`rcon.save_all`
+优先用 `rcon.list_players`、`rcon.time_query`、`rcon.save_all`，只有没有合适封装时才用 `rcon.command`。
 
-固定执行 `save-all` 或 `save-all flush`。
+## 8. MSMP 操作
 
-```json
-{ "flush": true }
-```
-
-## 10. MSMP 工具
-
-MSMP 需要 Minecraft Java 1.21.9+，并在实例内 `server.properties` 开启管理服务。MCP 不从客户端环境变量读取固定 MSMP URL 或 secret；每次调用都会通过 MCSManager 文件 API 读取目标实例的 `server.properties`，再动态连接对应 MSMP endpoint。
-
-示例配置：
-
-```properties
-management-server-enabled=true
-management-server-host=0.0.0.0
-management-server-port=25586
-management-server-secret=FortyAlphanumericCharactersOnly123456
-management-server-tls-enabled=false
-```
-
-其中 `management-server-secret` 必须是 40 位字母数字。生产环境建议启用 TLS 或只在可信网络中开放端口。
-
-`msmp.config.get`
-
-通过 MCSManager 读取 `server.properties` 中的 `management-server-*` 配置，不返回明文 secret。
+读取配置：
 
 ```json
 {
-  "daemonId": "optional-daemon-id",
-  "uuid": "optional-instance-uuid",
+  "daemonId": "daemon-id",
+  "uuid": "instance-uuid",
   "properties_path": "server.properties"
 }
 ```
 
-返回字段包括 `enabled`、`configuredHost`、`connectionHost`、`port`、`url`、`secretSet`、`tlsEnabled`。如果 `management-server-host` 是 `0.0.0.0`、`127.0.0.1` 或空值，工具会默认使用 `MCSM_BASE_URL` 的 hostname 作为连接目标；复杂网络拓扑可传 `connection_host` 覆盖。
-
-`msmp.config.set`
-
-通过 MCSManager 文件 API 修改 `server.properties` 中的 MSMP 配置。该工具要求 `dry_run=true` 或 `confirm=true`。
+修改配置：
 
 ```json
 {
+  "daemonId": "daemon-id",
+  "uuid": "instance-uuid",
   "enabled": true,
   "host": "0.0.0.0",
   "port": 25586,
-  "secret": "FortyAlphanumericCharactersOnly123456",
+  "secret": "Abcdefghij1234567890KLMNOPQRST1234567890",
   "tls_enabled": false,
   "dry_run": true
 }
 ```
 
-修改后通常需要重启实例。`secret` 如果传入，必须是 40 位字母数字。
+Minecraft 1.21.9 要求 secret 为 40 位字母数字。确认后改用 `confirm=true`，必要时重启实例。
 
-`msmp.discover`
+用 `msmp.discover` 或 `msmp.server.status` 验证。
 
-调用 `rpc.discover`，返回当前服务端支持的方法和 schema。
+## 9. 文件操作
 
-```json
-{
-  "daemonId": "optional-daemon-id",
-  "uuid": "optional-instance-uuid"
-}
-```
+优先使用相对路径：
 
-`msmp.call`
+- `server.properties`
+- `mods`
+- `config`
+- `logs/latest.log`
+- `crash-reports`
 
-调用任意 MSMP JSON-RPC 方法。只读白名单方法可传 `read_only=true`，其他方法必须 `confirm=true` 或 `dry_run=true`。
+常用步骤：
 
-```json
-{
-  "method": "minecraft:server/status",
-  "read_only": true
-}
-```
+1. `file.read` 或 `file.list`
+2. `file.write` / `file.write_new` / `file.upload_local` 加 `dry_run=true`
+3. 用户批准
+4. 改用 `confirm=true`
+5. `file.read` 或 `file.list` 验证
 
-`msmp.players.list`
+`file.write_new` 更适合创建新文件：它执行 `touch -> write`，并默认拒绝覆盖已存在文件。
 
-获取在线玩家。
+上传和下载都采用流式处理，并受 `MINECRAFT_OPS_MAX_BYTES` 限制。
 
-```json
-{}
-```
-
-`msmp.players.kick`
-
-踢出玩家。
-
-```json
-{
-  "players": [{"name": "Steve"}],
-  "message": "maintenance",
-  "confirm": true
-}
-```
-
-`msmp.server.status`
-
-读取服务端状态和版本。
-
-```json
-{}
-```
-
-`msmp.server.save`
-
-保存服务端状态。
-
-```json
-{
-  "flush": true,
-  "confirm": true
-}
-```
-
-`msmp.server.stop`
-
-停止服务端。
-
-```json
-{ "confirm": true }
-```
-
-`msmp.bans.get/add/remove/set/clear`
-
-管理玩家封禁列表。`set` 会替换整个封禁列表，`clear` 会清空封禁列表；使用前建议先 `get` 保存当前状态。
-
-```json
-{
-  "players": [{"name": "Steve"}],
-  "reason": "rule violation",
-  "source": "operator",
-  "confirm": true
-}
-```
-
-`msmp.ip_bans.get/add/remove/set/clear`
-
-管理 IP 封禁列表。
-
-```json
-{
-  "ips": ["203.0.113.10"],
-  "reason": "abuse",
-  "source": "operator",
-  "confirm": true
-}
-```
-
-`msmp.allowlist.get/add/remove/set/clear`
-
-管理白名单。
-
-```json
-{
-  "players": [{"name": "Alex"}],
-  "confirm": true
-}
-```
-
-`set` 会替换整个白名单，`clear` 会清空白名单，使用前建议先 `get` 保存当前状态。
-
-`msmp.operators.get/add/remove/set/clear`
-
-管理 OP。
-
-```json
-{
-  "players": [{"name": "Alex"}],
-  "permission_level": 4,
-  "bypasses_player_limit": false,
-  "confirm": true
-}
-```
-
-`set` 会替换整个 OP 列表，`clear` 会清空 OP 列表，使用前建议先 `get` 保存当前状态。
-
-`msmp.gamerules.get`
-
-读取所有 game rules。
-
-```json
-{}
-```
-
-`msmp.gamerules.update`
-
-修改一个 game rule。工具会把布尔值转换成 MSMP 要求的字符串。
-
-```json
-{
-  "rule": "doDaylightCycle",
-  "value": false,
-  "confirm": true
-}
-```
-
-`msmp.server_settings.get`
-
-读取一个 server setting。
-
-```json
-{ "setting": "difficulty" }
-```
-
-`msmp.server_settings.list`
-
-调用 `rpc.discover` 并提取当前服务端暴露的 `minecraft:serversettings/*` 方法，返回每个 setting 是否可读、可写，以及 MCP 已知的基础类型/枚举信息。
-
-```json
-{}
-```
-
-`msmp.server_settings.set`
-
-设置一个 server setting。对已知 setting 会做基础类型校验，例如 `difficulty` 必须是 `peaceful/easy/normal/hard`，`view_distance` 必须是整数，布尔 setting 必须传布尔值。
-
-```json
-{
-  "setting": "difficulty",
-  "value": "normal",
-  "confirm": true
-}
-```
-
-常见 setting 包括 `difficulty`、`motd`、`max_players`、`view_distance`、`simulation_distance`、`use_allowlist`、`enforce_allowlist`、`game_mode` 等。完整列表以 `msmp.discover` 返回为准。
-
-## 11. 跨后端便捷工具
-
-`server.save_world`
-
-按 `backend` 选择保存世界：
-
-- `auto`：优先 MSMP，其次 RCON，再次 MCSManager。
-- `msmp`：调用 `minecraft:server/save`。
-- `rcon`：执行 `save-all`。
-- `mcsm`：通过 MCSManager 控制台发送 `save-all`。
-
-```json
-{
-  "backend": "msmp",
-  "flush": true
-}
-```
-
-`server.broadcast`
-
-按 `backend` 发送广播：
-
-```json
-{
-  "backend": "msmp",
-  "message": "Server maintenance in 5 minutes",
-  "overlay": false
-}
-```
-
-## 12. 推荐操作流程
-
-健康检查：
-
-1. 读取 `minecraft-ops://config`。
-2. 调 `server.list_daemons` 和 `server.list_instances`。
-3. 调 `server.get_instance`、`server.get_logs`。
-4. 如果有 MSMP，调 `msmp.server.status`、`msmp.players.list`。
+## 10. 实例生命周期
 
 安全重启：
 
-1. `msmp.players.list` 或 `rcon.command {"command":"list"}` 查看在线玩家。
-2. `server.broadcast` 提前通知。
-3. `server.save_world` 保存。
-4. `server.restart {"dry_run":true}` 预览。
-5. 用户确认后 `server.restart {"confirm":true}`。
+1. `server.get_instance`
+2. `server.get_logs`
+3. `msmp.players.list` 或 `rcon.list_players`
+4. 如需通知玩家，使用 `server.broadcast`
+5. `server.save_world`
+6. `server.restart {"dry_run": true}`
+7. 用户批准
+8. `server.restart {"confirm": true}`
+9. 验证状态和日志
 
-创建 1.21.9+ MSMP 测试实例：
+`server.kill` 只应作为明确批准后的升级手段。
 
-1. `instance.create` 创建空实例。
-2. `file.upload_local` 上传官方 server jar。
-3. `file.touch` 和 `file.write` 写 `eula.txt`、`server.properties`、`run.sh`。
-4. `server.start` 启动。
-5. `msmp.discover` 验证 MSMP。
+## 11. 整合包兼容测试
 
-整合包兼容性测试闭环：
+推荐循环：
 
-1. 读取 `minecraft-ops://config` 和 `minecraft-ops://safety`，确认默认实例和高风险确认规则。
-2. 用 `server.get_instance`、`server.get_logs`、`file.list` 检查测试实例状态。
-3. 用 `modpack.snapshot_modlist` 生成基线快照：
+1. `modpack.snapshot_modlist` 保存基线。
+2. agent 外部检索候选 mod 版本。
+3. `modpack.apply_modlist {"dry_run": true}`。
+4. 用户批准。
+5. `modpack.apply_modlist {"confirm": true}`。
+6. 启动或重启测试实例。
+7. 读取日志和崩溃报告。
+8. `modpack.classify_startup_result`。
+9. `modpack.record_test_run`。
+10. 必要时 `modpack.rollback_snapshot`。
 
-```json
-{
-  "mods_dir": "mods",
-  "snapshot_name": "baseline-before-candidate-a",
-  "minecraft_version": "1.21.1",
-  "loader": "fabric"
-}
-```
+如果 MCSManager 目录 listing 不可靠，向 modpack 工具显式传 `remote_paths` 或 `current_paths`。
 
-4. 让 agent 查询 Modrinth、CurseForge、GitHub Releases 等外部资料，确定候选版本组合。MCP 不负责联网查询这些资料。
-5. 将候选 jar 放到 MCP 宿主机允许目录，或准备带 `url` / `localPath` / cached blob 的目标 snapshot。
-6. 用 `modpack.snapshot_modlist` 生成候选快照；再用 `modpack.diff_snapshots` 对比基线和候选。
-7. 用 `modpack.apply_modlist` 先 dry-run：
+## 12. 多服务器管理
 
-```json
-{
-  "manifest_path": "/srv/minecraft-ops/modpack-workspace/snapshots/candidate-a.json",
-  "mods_dir": "mods",
-  "clean_extra": true,
-  "dry_run": true
-}
-```
-
-8. 确认 `missingSources` 为 `0`，并向用户报告 upload / replace / delete 计划。只有用户明确同意后才传 `confirm=true`。
-9. 启动测试实例，读取 `logs/latest.log` 或 crash report。
-10. 用 `modpack.classify_startup_result` 对启动结果分类：
+同时处理两个服务器时，先记录各自目标：
 
 ```json
 {
-  "log_path": "logs/latest.log",
-  "max_chars": 262144
+  "serverA": {"daemonId": "daemon-id", "uuid": "uuid-a"},
+  "serverB": {"daemonId": "daemon-id", "uuid": "uuid-b"}
 }
 ```
 
-11. 用 `modpack.record_test_run` 记录本轮结果：
+之后每次调用都带对应 id：
 
-```json
-{
-  "run_name": "candidate-a-startup",
-  "scenario": "startup",
-  "outcome": "failed",
-  "before_snapshot_id": "baseline-snapshot-id",
-  "after_snapshot_id": "candidate-snapshot-id",
-  "classification": {
-    "status": "failure",
-    "category": "mod_resolution"
-  },
-  "tags": ["compat", "startup"],
-  "notes": "候选 A 启动失败，下一轮只调整缺失依赖。"
-}
+1. 分别调用 `rcon.config.get`。
+2. 分别调用 `msmp.config.get`。
+3. 确认端口和 `connectionHost`。
+4. 用显式 id 执行操作。
+5. 分别读回状态，确认没有串实例。
+
+真实探针 `scripts/multi_server_backend_probe.py` 会创建两个临时实例，使用独立 RCON/MSMP 凭据，并在同一个 MCP 进程中交替调用以验证隔离性。
+
+## 13. 测试命令
+
+本地检查：
+
+```bash
+PYTHONPATH=src python3 -B -m unittest discover -s tests
+python3 -m compileall -q src scripts
 ```
 
-12. 如果失败，先用 `modpack.rollback_snapshot` dry-run，再在用户确认后回滚。
-13. 用 `modpack.list_test_runs` 和 `modpack.get_test_run` 汇总历史候选组合，避免重复测试同一组合。
+真实后端探针：
 
-当 MCSManager 目录 listing 为空或不可靠时：
+```bash
+python3 -B scripts/mcp_integration_probe.py > /tmp/minecraft-ops-mcp-probe-report.json
+python3 -B scripts/msmp_temp_instance_probe.py > /tmp/minecraft-ops-mcp-msmp-probe-report.json
+python3 -B scripts/multi_server_backend_probe.py > /tmp/minecraft-ops-mcp-multi-probe-report.json
+```
 
-- `modpack.snapshot_modlist` 传 `remote_paths`。
-- `modpack.apply_modlist` 和 `modpack.rollback_snapshot` 传 `current_paths`。
-- 不传这些显式路径时，工具无法发现额外 jar，也就不能安全删除或回滚它们。
+真实探针会创建临时文件或实例，结束后清理。只在可丢弃测试环境运行。
